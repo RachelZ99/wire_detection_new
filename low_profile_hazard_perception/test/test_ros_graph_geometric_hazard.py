@@ -158,7 +158,15 @@ def _transform(
 def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
     None
 ):
-    rclpy.init()
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "sensor_stale_after_ms:=5000.0",
+            "-p",
+            "receive_stale_after_ms:=5000.0",
+        ]
+    )
     perception = GeometricHazardNode()
     driver = Node("geometric_hazard_test_driver")
     executor = SingleThreadedExecutor()
@@ -207,9 +215,26 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         base_ns = driver.get_clock().now().nanoseconds + 100_000_000
         first_stamp = Time(nanoseconds=base_ns + 100_000_000).to_msg()
         second_stamp = Time(nanoseconds=base_ns + 300_000_000).to_msg()
+        third_stamp = Time(nanoseconds=base_ns + 400_000_000).to_msg()
+        fourth_stamp = Time(nanoseconds=base_ns + 500_000_000).to_msg()
+        publishers["depth"].publish(
+            _depth(first_stamp, object_center_column=360)
+        )
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.degradation_reason")
+            == "camera_info:missing",
+        )
+        assert clouds == []
+
         publishers["color_info"].publish(_camera_info(first_stamp))
         publishers["depth_info"].publish(_camera_info(first_stamp))
         publishers["color"].publish(_color(first_stamp))
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.degradation_reason")
+            == "tf:missing",
+        )
         publishers["tf_static"].publish(
             TFMessage(
                 transforms=[
@@ -228,11 +253,18 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
                 transforms=[_transform(first_stamp, "odom", "base_footprint")]
             )
         )
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.degradation_reason")
+            == "odom:missing",
+        )
         odom_samples = (
             (base_ns + 50_000_000, 0.0),
             (base_ns + 150_000_000, 0.0),
             (base_ns + 250_000_000, 0.1),
             (base_ns + 350_000_000, 0.1),
+            (base_ns + 450_000_000, 0.1),
+            (base_ns + 550_000_000, 0.1),
         )
         for stamp_ns, x in odom_samples:
             publishers["odom"].publish(
@@ -240,9 +272,6 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
             )
             executor.spin_once(timeout_sec=0.02)
 
-        publishers["depth"].publish(
-            _depth(first_stamp, object_center_column=360)
-        )
         _spin_until(
             executor,
             lambda: _values(health).get("geometry.latest_candidate_count")
@@ -250,14 +279,98 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         )
         assert clouds == []
 
+        stale_stamp = Time(nanoseconds=base_ns - 6_000_000_000).to_msg()
+        publishers["depth_info"].publish(_camera_info(stale_stamp))
+        _spin_until(
+            executor,
+            lambda: float(
+                _values(health).get(
+                    "depth_camera_info.sensor_stamp_age_ms", "0"
+                )
+            )
+            > 5000.0,
+        )
         publishers["depth"].publish(
             _depth(second_stamp, object_center_column=302)
+        )
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.degradation_reason")
+            == "camera_info:sensor_stale",
+        )
+        assert clouds == []
+        publishers["depth_info"].publish(_camera_info(second_stamp))
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.processed_depth_count")
+            == "2",
+        )
+
+        publishers["tf"].publish(
+            TFMessage(
+                transforms=[_transform(stale_stamp, "odom", "base_footprint")]
+            )
+        )
+        _spin_until(
+            executor,
+            lambda: float(
+                _values(health).get("tf.sensor_stamp_age_ms", "0")
+            )
+            > 5000.0,
+        )
+        publishers["depth"].publish(
+            _depth(third_stamp, object_center_column=302)
+        )
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.degradation_reason")
+            == "tf:sensor_stale",
+        )
+        assert clouds == []
+        publishers["tf"].publish(
+            TFMessage(
+                transforms=[_transform(third_stamp, "odom", "base_footprint")]
+            )
+        )
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.processed_depth_count")
+            == "3",
+        )
+
+        publishers["depth"].publish(
+            _depth(fourth_stamp, object_center_column=302)
         )
         _spin_until(executor, lambda: len(clouds) == 1)
         cloud = clouds[0]
         assert cloud.header.frame_id == "odom"
-        assert cloud.header.stamp == second_stamp
+        assert cloud.header.stamp == fourth_stamp
         assert cloud.width > 100
+        field_names = {field.name for field in cloud.fields}
+        assert "observation_stamp_sec" in field_names
+        assert "observation_stamp_nanosec" in field_names
+        stamp_sec_field = next(
+            field
+            for field in cloud.fields
+            if field.name == "observation_stamp_sec"
+        )
+        stamp_nanosec_field = next(
+            field
+            for field in cloud.fields
+            if field.name == "observation_stamp_nanosec"
+        )
+        point_source_stamp = (
+            struct.unpack_from(
+                "<i", bytes(cloud.data), stamp_sec_field.offset
+            )[0]
+            * 1_000_000_000
+            + struct.unpack_from(
+                "<I", bytes(cloud.data), stamp_nanosec_field.offset
+            )[0]
+        )
+        assert point_source_stamp == (
+            fourth_stamp.sec * 1_000_000_000 + fourth_stamp.nanosec
+        )
         spread_field = next(
             field
             for field in cloud.fields
@@ -283,9 +396,9 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         assert values["geometry.confirmed_retention_ms"] == "2000.000"
         assert values["geometry.output_durability"] == "transient_local"
 
-        failure_stamp = Time(nanoseconds=base_ns + 400_000_000).to_msg()
+        failure_stamp = Time(nanoseconds=base_ns + 600_000_000).to_msg()
         publishers["odom"].publish(
-            _odom(Time(nanoseconds=base_ns + 450_000_000).to_msg(), 0.1)
+            _odom(Time(nanoseconds=base_ns + 650_000_000).to_msg(), 0.1)
         )
         executor.spin_once(timeout_sec=0.02)
         publishers["depth"].publish(_invalid_depth(failure_stamp))
@@ -299,13 +412,30 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         assert values["geometry.degradation_reason"].startswith("ground:")
         assert len(clouds) == 1
 
-        recovery_stamp = Time(nanoseconds=base_ns + 500_000_000).to_msg()
+        recovery_stamp = Time(nanoseconds=base_ns + 700_000_000).to_msg()
         publishers["odom"].publish(
-            _odom(Time(nanoseconds=base_ns + 550_000_000).to_msg(), 0.1)
+            _odom(Time(nanoseconds=base_ns + 750_000_000).to_msg(), 0.1)
         )
         executor.spin_once(timeout_sec=0.02)
         publishers["depth"].publish(
             _depth(recovery_stamp, object_center_column=302)
+        )
+        _spin_until(
+            executor,
+            lambda: _values(health).get("geometry.degradation_reason")
+            == "recovery:reconfirmation_required",
+        )
+        assert len(clouds) == 1
+
+        reconfirmation_stamp = Time(
+            nanoseconds=base_ns + 800_000_000
+        ).to_msg()
+        publishers["odom"].publish(
+            _odom(Time(nanoseconds=base_ns + 850_000_000).to_msg(), 0.1)
+        )
+        executor.spin_once(timeout_sec=0.02)
+        publishers["depth"].publish(
+            _depth(reconfirmation_stamp, object_center_column=302)
         )
         _spin_until(
             executor,
@@ -325,6 +455,19 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         values = _values(health)
         assert values["geometry.active_retained_hazard_count"] == "1"
         assert values["geometry.degradation_reason"] == ""
+
+        _spin_until(executor, lambda: len(clouds) == 3, timeout=4.0)
+        clearing = clouds[-1]
+        assert clearing.width == 0
+        clearing_stamp_ns = (
+            clearing.header.stamp.sec * 1_000_000_000
+            + clearing.header.stamp.nanosec
+        )
+        reconfirmation_stamp_ns = (
+            reconfirmation_stamp.sec * 1_000_000_000
+            + reconfirmation_stamp.nanosec
+        )
+        assert clearing_stamp_ns - reconfirmation_stamp_ns >= 2_000_000_000
     finally:
         executor.remove_node(driver)
         executor.remove_node(perception)

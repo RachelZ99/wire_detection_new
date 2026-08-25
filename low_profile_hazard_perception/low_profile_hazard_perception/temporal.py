@@ -312,6 +312,11 @@ class _Track:
     evidence: set[EvidenceSource] = field(default_factory=set)
     confidence: float = 0.0
     confirmed: bool = False
+    refresh_centroids: list[Point3] = field(default_factory=list)
+    refresh_last_stamp_ns: int | None = None
+    refresh_latest_points: tuple[Point3, ...] = ()
+    refresh_evidence: set[EvidenceSource] = field(default_factory=set)
+    refresh_confidence: float = 0.0
 
     @property
     def centroid(self) -> Point3:
@@ -335,6 +340,8 @@ class HazardTracker:
     def clear_candidates(self) -> None:
         """Discard unconfirmed accumulation without clearing known hazards."""
         self._tracks = [track for track in self._tracks if track.confirmed]
+        for track in self._tracks:
+            self._clear_refresh(track)
 
     def retained_at(
         self,
@@ -363,6 +370,7 @@ class HazardTracker:
         observation: HazardObservation,
         *,
         allow_confirmed_expiry: bool = True,
+        require_reconfirmation_for_confirmed: bool = False,
     ) -> tuple[ConfirmedHazard, ...]:
         if observation.sensor_stamp_ns <= 0:
             return ()
@@ -371,10 +379,25 @@ class HazardTracker:
             observation.sensor_stamp_ns,
             expire_confirmed=allow_confirmed_expiry,
         )
+        if require_reconfirmation_for_confirmed:
+            confirmed_matching = [
+                (self._distance(centroid, track.centroid), track)
+                for track in self._tracks
+                if track.confirmed
+                and self._distance(centroid, track.centroid)
+                <= self.config.association_radius_m
+            ]
+            if confirmed_matching:
+                _, track = min(confirmed_matching, key=lambda item: item[0])
+                return self._observe_refresh(track, observation)
         matching = [
             (self._distance(centroid, track.centroid), track)
             for track in self._tracks
             if track.last_stamp_ns < observation.sensor_stamp_ns
+            and (
+                not track.confirmed
+                or not require_reconfirmation_for_confirmed
+            )
             and (
                 track.confirmed
                 or observation.sensor_stamp_ns - track.last_stamp_ns
@@ -407,6 +430,54 @@ class HazardTracker:
             return ()
         track.confirmed = True
         return (self._confirmed_hazard(track),)
+
+    def _observe_refresh(
+        self, track: _Track, observation: HazardObservation
+    ) -> tuple[ConfirmedHazard, ...]:
+        centroid = observation.centroid
+        refresh_expired = (
+            track.refresh_last_stamp_ns is None
+            or observation.sensor_stamp_ns <= track.refresh_last_stamp_ns
+            or observation.sensor_stamp_ns - track.refresh_last_stamp_ns
+            > self.config.confirmation_window_ns
+        )
+        refresh_inconsistent = bool(track.refresh_centroids) and self._distance(
+            centroid,
+            self._centroid(track.refresh_centroids),
+        ) > self.config.association_radius_m
+        if refresh_expired or refresh_inconsistent:
+            self._clear_refresh(track)
+        track.refresh_centroids.append(centroid)
+        track.refresh_last_stamp_ns = observation.sensor_stamp_ns
+        track.refresh_latest_points = observation.points_odom
+        track.refresh_evidence.add(observation.evidence)
+        track.refresh_confidence = max(
+            track.refresh_confidence, observation.confidence
+        )
+        if len(track.refresh_centroids) < 2:
+            return ()
+        track.last_stamp_ns = observation.sensor_stamp_ns
+        track.observation_centroids.extend(track.refresh_centroids)
+        track.latest_points = track.refresh_latest_points
+        track.evidence.update(track.refresh_evidence)
+        track.confidence = max(track.confidence, track.refresh_confidence)
+        self._clear_refresh(track)
+        return (self._confirmed_hazard(track),)
+
+    @staticmethod
+    def _clear_refresh(track: _Track) -> None:
+        track.refresh_centroids.clear()
+        track.refresh_last_stamp_ns = None
+        track.refresh_latest_points = ()
+        track.refresh_evidence.clear()
+        track.refresh_confidence = 0.0
+
+    @staticmethod
+    def _centroid(points: list[Point3]) -> Point3:
+        return tuple(
+            sum(point[axis] for point in points) / len(points)
+            for axis in range(3)
+        )
 
     def _expire_at(
         self, sensor_now_ns: int, *, expire_confirmed: bool = True

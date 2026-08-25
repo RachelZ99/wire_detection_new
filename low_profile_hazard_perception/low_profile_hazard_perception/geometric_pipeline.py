@@ -71,9 +71,8 @@ class GeometricHazardPipeline:
     def add_odom(self, sensor_stamp_ns: int, odom_from_base: Pose3) -> str:
         reason = self.odom.add(sensor_stamp_ns, odom_from_base)
         if reason:
-            self.tracker.clear_candidates()
+            self._suspend_confirmation()
             self._pending_alignment_reason = reason
-            self._confirmed_expiry_suspended = True
         return reason
 
     def retained_at(
@@ -84,10 +83,11 @@ class GeometricHazardPipeline:
             allow_confirmed_expiry=not self._confirmed_expiry_suspended,
         )
 
-    def clear_candidates(self) -> None:
-        self.tracker.clear_candidates()
-
     def suspend_confirmed_expiry(self) -> None:
+        self._suspend_confirmation()
+
+    def _suspend_confirmation(self) -> None:
+        self.tracker.clear_candidates()
         self._confirmed_expiry_suspended = True
 
     def alignment_at(self, sensor_stamp_ns: int) -> Pose3 | None:
@@ -95,9 +95,8 @@ class GeometricHazardPipeline:
             return None
         alignment = self.odom.alignment_at(sensor_stamp_ns)
         if alignment.pose is None:
-            self.tracker.clear_candidates()
+            self._suspend_confirmation()
             self._pending_alignment_reason = alignment.reason
-            self._confirmed_expiry_suspended = True
             return None
         return alignment.pose.compose(self.base_from_camera)
 
@@ -112,25 +111,22 @@ class GeometricHazardPipeline:
             return None
         alignment = self.odom.alignment_at(sensor_stamp_ns)
         if alignment.pose is None:
-            self.tracker.clear_candidates()
+            self._suspend_confirmation()
             self._pending_alignment_reason = alignment.reason
-            self._confirmed_expiry_suspended = True
             return None
         odom_from_base = alignment.pose
         degradation_reason = self._pending_alignment_reason
         if degradation_reason:
-            self.tracker.clear_candidates()
+            self._suspend_confirmation()
             self._pending_alignment_reason = ""
-            self._confirmed_expiry_suspended = True
         if (
             self._last_aligned_observation_stamp_ns is not None
             and not self.odom.continuous_between(
                 self._last_aligned_observation_stamp_ns, sensor_stamp_ns
             )
         ):
-            self.tracker.clear_candidates()
+            self._suspend_confirmation()
             degradation_reason = "odom:discontinuous"
-            self._confirmed_expiry_suspended = True
         self._last_aligned_observation_stamp_ns = sensor_stamp_ns
         ground = self.ground_estimator.estimate(
             depth_values,
@@ -144,8 +140,7 @@ class GeometricHazardPipeline:
             )
         )
         if not ground.accepted:
-            self.tracker.clear_candidates()
-            self._confirmed_expiry_suspended = True
+            self._suspend_confirmation()
             return GeometricPipelineResult(
                 sensor_stamp_ns=sensor_stamp_ns,
                 ground=ground,
@@ -169,6 +164,7 @@ class GeometricHazardPipeline:
             depth_unit_m=depth_unit_m,
         )
         confirmed: list[ConfirmedHazard] = []
+        reconfirmation_required = self._confirmed_expiry_suspended
         for candidate in candidates:
             points_odom = tuple(
                 odom_from_camera.transform_point(point)
@@ -185,10 +181,15 @@ class GeometricHazardPipeline:
                     allow_confirmed_expiry=(
                         not self._confirmed_expiry_suspended
                     ),
+                    require_reconfirmation_for_confirmed=(
+                        reconfirmation_required
+                    ),
                 )
             )
         if confirmed and not degradation_reason:
             self._confirmed_expiry_suspended = False
+        elif reconfirmation_required and not degradation_reason:
+            degradation_reason = "recovery:reconfirmation_required"
         return GeometricPipelineResult(
             sensor_stamp_ns=sensor_stamp_ns,
             ground=ground,

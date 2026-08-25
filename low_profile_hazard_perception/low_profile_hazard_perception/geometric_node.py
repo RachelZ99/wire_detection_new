@@ -53,6 +53,7 @@ class GeometricHazardNode(InputHealthNode):
         self._latest_confirmation_spread_m: float | None = None
         self._cloud_publish_count = 0
         self._pending_depth_drop_count = 0
+        self._processed_depth_count = 0
         self._geometric_degradation_reason = ""
         self._last_published_retained_signature: tuple[object, ...] = ()
         self._had_operational_hazard_output = False
@@ -358,6 +359,7 @@ class GeometricHazardNode(InputHealthNode):
             self._publish_health()
             return
         self._geometric_degradation_reason = result.degradation_reason
+        self._processed_depth_count += 1
         self._last_ground = result.ground
         self._last_nominal_ground_angle_error_degrees = (
             result.nominal_ground_angle_error_degrees
@@ -372,7 +374,6 @@ class GeometricHazardNode(InputHealthNode):
         self._publish_health()
 
     def _block_new_confirmation(self, reason: str) -> None:
-        self._pipeline.clear_candidates()
         self._pipeline.suspend_confirmed_expiry()
         self._geometric_degradation_reason = reason
         self._publish_health()
@@ -479,6 +480,7 @@ class GeometricHazardNode(InputHealthNode):
                 "geometry.pending_depth_drops": (
                     self._pending_depth_drop_count
                 ),
+                "geometry.processed_depth_count": self._processed_depth_count,
                 "geometry.active_retained_hazard_count": (
                     self._active_retained_count
                 ),
@@ -536,14 +538,18 @@ def _point_cloud(
     sensor_now_ns: int,
 ) -> PointCloud2:
     cloud = PointCloud2()
-    observation_stamp_ns = max(
+    observation_stamp_ns = min(
         (hazard.sensor_stamp_ns for hazard in retained),
         default=sensor_now_ns,
     )
     cloud.header.stamp = Time(nanoseconds=observation_stamp_ns).to_msg()
     cloud.header.frame_id = "odom"
     points = tuple(
-        (point, hazard.spatial_spread_m)
+        (
+            point,
+            hazard.spatial_spread_m,
+            divmod(hazard.sensor_stamp_ns, 1_000_000_000),
+        )
         for hazard in retained
         for point in hazard.points_odom
     )
@@ -559,13 +565,31 @@ def _point_cloud(
             datatype=PointField.FLOAT32,
             count=1,
         ),
+        PointField(
+            name="observation_stamp_sec",
+            offset=16,
+            datatype=PointField.INT32,
+            count=1,
+        ),
+        PointField(
+            name="observation_stamp_nanosec",
+            offset=20,
+            datatype=PointField.UINT32,
+            count=1,
+        ),
     ]
     cloud.is_bigendian = False
-    cloud.point_step = 16
+    cloud.point_step = 24
     cloud.row_step = cloud.point_step * cloud.width
     cloud.data = b"".join(
-        struct.pack("<ffff", *point, confirmation_spread_m)
-        for point, confirmation_spread_m in points
+        struct.pack(
+            "<ffffiI",
+            *point,
+            confirmation_spread_m,
+            stamp_parts[0],
+            stamp_parts[1],
+        )
+        for point, confirmation_spread_m, stamp_parts in points
     )
     cloud.is_dense = True
     return cloud

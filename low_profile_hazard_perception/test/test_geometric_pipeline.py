@@ -168,10 +168,22 @@ class GeometricPipelineTests(unittest.TestCase):
 
         assert recovered is not None
         self.assertTrue(recovered.ground.accepted, recovered.ground.reason)
-        self.assertEqual(len(recovered.confirmed), 1)
+        self.assertEqual(recovered.confirmed, ())
         self.assertEqual(len(recovered.retained), 1)
-        self.assertEqual(recovered.retained[0].observation_count, 3)
-        self.assertEqual(recovered.degradation_reason, "")
+        self.assertEqual(recovered.retained[0].observation_count, 2)
+        self.assertEqual(
+            recovered.degradation_reason,
+            "recovery:reconfirmation_required",
+        )
+
+        pipeline.add_odom(1_450_000_000, Pose3.identity())
+        reconfirmed = pipeline.process_depth(1_400_000_000, depth)
+
+        assert reconfirmed is not None
+        self.assertEqual(len(reconfirmed.confirmed), 1)
+        self.assertEqual(len(reconfirmed.retained), 1)
+        self.assertEqual(reconfirmed.retained[0].observation_count, 4)
+        self.assertEqual(reconfirmed.degradation_reason, "")
 
         pipeline.suspend_confirmed_expiry()
         self.assertEqual(len(pipeline.retained_at(4_000_000_000)), 1)
@@ -191,12 +203,20 @@ class GeometricPipelineTests(unittest.TestCase):
         recovered = pipeline.process_depth(1_400_000_000, depth)
 
         assert recovered is not None
-        # The already-confirmed track may receive a spatially bounded refresh;
-        # the discontinuity must not let an unconfirmed pre-gap candidate turn
-        # into a newly confirmed hazard.
-        self.assertEqual(len(recovered.confirmed), 1)
+        # A discontinuity preserves the operational shape but makes the first
+        # post-gap observation diagnostic-only until a second one agrees.
+        self.assertEqual(recovered.confirmed, ())
         self.assertEqual(len(recovered.retained), 1)
+        self.assertEqual(recovered.retained[0].observation_count, 2)
         self.assertEqual(recovered.degradation_reason, "odom:discontinuous")
+
+        pipeline.add_odom(1_550_000_000, Pose3.identity())
+        reconfirmed = pipeline.process_depth(1_500_000_000, depth)
+
+        assert reconfirmed is not None
+        self.assertEqual(len(reconfirmed.confirmed), 1)
+        self.assertEqual(len(reconfirmed.retained), 1)
+        self.assertEqual(reconfirmed.degradation_reason, "")
 
     def test_disordered_odom_prevents_cross_frame_confirmation(self) -> None:
         depth, intrinsics = _scene(raised=True, reflective_hole=False)

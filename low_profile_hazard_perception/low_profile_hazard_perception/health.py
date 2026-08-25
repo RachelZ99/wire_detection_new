@@ -184,6 +184,7 @@ def geometric_projection_support_reason(snapshot: HealthSnapshot) -> str:
         (Stream.TF, "tf"),
         (Stream.TF_STATIC, "tf_static"),
         (Stream.ODOM, "odom"),
+        (Stream.DEPTH_IMAGE, "depth"),
     )
     for stream, label in required:
         if stream in snapshot.missing_streams:

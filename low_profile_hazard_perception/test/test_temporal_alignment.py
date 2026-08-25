@@ -173,6 +173,54 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
         self.assertEqual(tracker.candidate_count_at(1_500_000_001), 0)
         self.assertEqual(tracker.retained_at(1_500_000_001), ())
 
+    def test_recovery_requires_two_observations_before_refreshing_shape(
+        self,
+    ) -> None:
+        tracker = HazardTracker()
+        for stamp_ns, x in (
+            (1_000_000_000, 0.80),
+            (1_100_000_000, 0.81),
+        ):
+            tracker.observe(
+                HazardObservation(
+                    sensor_stamp_ns=stamp_ns,
+                    points_odom=((x, 0.2, 0.04),),
+                    evidence=EvidenceSource.STRONG_GEOMETRY,
+                    confidence=0.9,
+                )
+            )
+        original = tracker.retained_at(1_100_000_000)[0]
+        first_refresh = HazardObservation(
+            sensor_stamp_ns=1_800_000_000,
+            points_odom=((0.86, 0.2, 0.04), (0.87, 0.2, 0.04)),
+            evidence=EvidenceSource.STRONG_GEOMETRY,
+            confidence=0.95,
+        )
+
+        first_result = tracker.observe(
+            first_refresh,
+            allow_confirmed_expiry=False,
+            require_reconfirmation_for_confirmed=True,
+        )
+
+        self.assertEqual(first_result, ())
+        after_first = tracker.retained_at(
+            1_800_000_000, allow_confirmed_expiry=False
+        )[0]
+        self.assertEqual(after_first.points_odom, original.points_odom)
+        second_result = tracker.observe(
+            HazardObservation(
+                sensor_stamp_ns=1_900_000_000,
+                points_odom=((0.855, 0.2, 0.04), (0.865, 0.2, 0.04)),
+                evidence=EvidenceSource.STRONG_GEOMETRY,
+                confidence=0.96,
+            ),
+            allow_confirmed_expiry=False,
+            require_reconfirmation_for_confirmed=True,
+        )
+        self.assertEqual(len(second_result), 1)
+        self.assertNotEqual(second_result[0].points_odom, original.points_odom)
+
     def test_stale_or_discontinuous_odom_cannot_support_alignment(
         self,
     ) -> None:

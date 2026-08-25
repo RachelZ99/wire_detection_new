@@ -179,15 +179,18 @@ configured retention floor of 2000 ms; configurations below two seconds are
 rejected. The operational topic is transient-local and represents the current
 retained set. A non-empty set is republished only when its observations change,
 and one stamped empty cloud clears it after safe expiry, keeping deterministic
-replay independent of timer frequency.
+replay independent of timer frequency. Every point carries its own source
+seconds/nanoseconds; the cloud header conservatively uses the oldest source
+stamp in the retained set.
 
 Ground rejection, missing/stale/invalid CameraInfo or TF, and missing, stale,
 disordered, gapped, or discontinuous odom block new cross-frame confirmation
 and publish a machine-readable diagnostic reason. These states clear candidate
 accumulation but never clear a retained confirmed hazard. Confirmed expiry is
 suspended while health cannot support a safe interpretation; a spatially
-consistent observation after recovery refreshes the same retained hazard rather
-than duplicating or teleporting it.
+consistent pair of observations after recovery refreshes the same retained
+hazard rather than duplicating or teleporting it. The first recovery observation
+is diagnostic-only and cannot replace the operational footprint.
 
 The configured retention and current behavior are visible as
 `geometry.candidate_retention_ms`, `geometry.confirmed_retention_ms`,

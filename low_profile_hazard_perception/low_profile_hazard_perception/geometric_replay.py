@@ -77,6 +77,22 @@ class _Collector(Node):
             ),
             None,
         )
+        stamp_sec_field = next(
+            (
+                field
+                for field in message.fields
+                if field.name == "observation_stamp_sec"
+            ),
+            None,
+        )
+        stamp_nanosec_field = next(
+            (
+                field
+                for field in message.fields
+                if field.name == "observation_stamp_nanosec"
+            ),
+            None,
+        )
         confirmation_spread_m = None
         if spread_field is not None and message.data:
             confirmation_spread_m = round(
@@ -96,6 +112,28 @@ class _Collector(Node):
             struct.unpack_from("<fff", bytes(message.data), offset)
             for offset in range(0, len(message.data), int(message.point_step))
         ]
+        source_stamps_ns: list[int] = []
+        if (
+            stamp_sec_field is not None
+            and stamp_nanosec_field is not None
+            and message.data
+        ):
+            source_stamps_ns = [
+                struct.unpack_from(
+                    "<i",
+                    bytes(message.data),
+                    offset + stamp_sec_field.offset,
+                )[0]
+                * 1_000_000_000
+                + struct.unpack_from(
+                    "<I",
+                    bytes(message.data),
+                    offset + stamp_nanosec_field.offset,
+                )[0]
+                for offset in range(
+                    0, len(message.data), int(message.point_step)
+                )
+            ]
         x_values = [point[0] for point in points]
         y_values = [point[1] for point in points]
         z_values = sorted(point[2] for point in points)
@@ -126,6 +164,12 @@ class _Collector(Node):
                     else None
                 ),
                 "confirmation_spread_m": confirmation_spread_m,
+                "source_stamp_min_ns": (
+                    min(source_stamps_ns) if source_stamps_ns else None
+                ),
+                "source_stamp_max_ns": (
+                    max(source_stamps_ns) if source_stamps_ns else None
+                ),
                 "clearing": not points,
             }
         )
@@ -329,6 +373,16 @@ def main(args: list[str] | None = None) -> None:
         for cloud in clouds
     ):
         raise SystemExit("operational clouds must be stamped in odom")
+    if any(
+        cloud["source_stamp_min_ns"] is None
+        or cloud["source_stamp_min_ns"] <= 0
+        or cloud["stamp_ns"] != cloud["source_stamp_min_ns"]
+        for cloud in hazard_clouds
+    ):
+        raise SystemExit(
+            "hazard points must retain source stamps and the cloud header "
+            "must conservatively use the oldest source stamp"
+        )
     strong_clouds = [
         cloud
         for cloud in hazard_clouds
