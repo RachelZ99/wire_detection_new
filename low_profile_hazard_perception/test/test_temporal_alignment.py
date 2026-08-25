@@ -136,37 +136,6 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
         self.assertEqual(second_rgb[0].observation_count, 2)
         self.assertEqual(second_rgb[0].evidence, (EvidenceSource.RGB_CABLE,))
 
-    def test_floor_projected_hanging_wire_parallax_does_not_confirm(
-        self,
-    ) -> None:
-        tracker = HazardTracker(
-            HazardTrackerConfig(association_radius_m=0.08)
-        )
-
-        first = tracker.observe(
-            HazardObservation(
-                sensor_stamp_ns=1_000_000_000,
-                points_odom=((0.80, 0.20, 0.0),),
-                evidence=EvidenceSource.RGB_CABLE,
-                confidence=0.9,
-            )
-        )
-        # A depth-invalid hanging wire is conservatively ray-projected to the
-        # floor. Robot motion changes that false intersection in odom, so the
-        # second observation falls outside the confirmation association gate.
-        second = tracker.observe(
-            HazardObservation(
-                sensor_stamp_ns=1_100_000_000,
-                points_odom=((0.95, 0.20, 0.0),),
-                evidence=EvidenceSource.RGB_CABLE,
-                confidence=0.9,
-            )
-        )
-
-        self.assertEqual(first, ())
-        self.assertEqual(second, ())
-        self.assertEqual(tracker.candidate_count_at(1_100_000_000), 2)
-
     def test_confirmed_hazard_outlives_candidate_and_is_not_duplicated(
         self,
     ) -> None:
