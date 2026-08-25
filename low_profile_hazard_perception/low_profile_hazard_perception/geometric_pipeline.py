@@ -97,17 +97,18 @@ class GeometricHazardPipeline:
             depth_unit_m=depth_unit_m,
             nominal_camera_height_m=self.nominal_camera_height_m,
         )
+        nominal_angle_error = (
+            self.base_from_camera.normal_error_to_parent_up_degrees(
+                ground.model.normal
+            )
+        )
         if not ground.accepted:
             return GeometricPipelineResult(
                 sensor_stamp_ns=sensor_stamp_ns,
                 ground=ground,
                 candidates=(),
                 confirmed=(),
-                nominal_ground_angle_error_degrees=(
-                    self.base_from_camera.normal_error_to_parent_up_degrees(
-                        ground.model.normal
-                    )
-                ),
+                nominal_ground_angle_error_degrees=nominal_angle_error,
             )
         observed_base_from_camera = self.base_from_camera.with_observed_ground(
             ground.model.normal, ground.model.camera_height_m
@@ -140,9 +141,5 @@ class GeometricHazardPipeline:
             ground=ground,
             candidates=candidates,
             confirmed=tuple(confirmed),
-            nominal_ground_angle_error_degrees=(
-                self.base_from_camera.normal_error_to_parent_up_degrees(
-                    ground.model.normal
-                )
-            ),
+            nominal_ground_angle_error_degrees=nominal_angle_error,
         )

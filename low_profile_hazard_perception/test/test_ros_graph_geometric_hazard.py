@@ -252,6 +252,15 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         assert cloud.header.frame_id == "odom"
         assert cloud.header.stamp == second_stamp
         assert cloud.width > 100
+        spread_field = next(
+            field
+            for field in cloud.fields
+            if field.name == "confirmation_spread"
+        )
+        confirmation_spread = struct.unpack_from(
+            "<f", bytes(cloud.data), spread_field.offset
+        )[0]
+        assert confirmation_spread < 0.025
         points = [
             struct.unpack_from("<fff", bytes(cloud.data), offset)
             for offset in range(0, len(cloud.data), cloud.point_step)

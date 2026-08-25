@@ -69,6 +69,22 @@ class _Collector(Node):
         )
 
     def _collect_cloud(self, message: PointCloud2) -> None:
+        spread_field = next(
+            (
+                field
+                for field in message.fields
+                if field.name == "confirmation_spread"
+            ),
+            None,
+        )
+        confirmation_spread_m = None
+        if spread_field is not None and message.data:
+            confirmation_spread_m = round(
+                struct.unpack_from(
+                    "<f", bytes(message.data), spread_field.offset
+                )[0],
+                6,
+            )
         points = [
             struct.unpack_from("<fff", bytes(message.data), offset)
             for offset in range(0, len(message.data), int(message.point_step))
@@ -102,6 +118,7 @@ class _Collector(Node):
                     if y_values
                     else None
                 ),
+                "confirmation_spread_m": confirmation_spread_m,
             }
         )
 
@@ -322,6 +339,15 @@ def main(args: list[str] | None = None) -> None:
     if any(cloud["horizontal_span_m"] > 0.75 for cloud in clouds):
         raise SystemExit(
             "an operational cloud has a trail-like spatial extent"
+        )
+    if any(
+        cloud["confirmation_spread_m"] is None
+        or cloud["confirmation_spread_m"] > options.maximum_alignment_spread
+        for cloud in clouds
+    ):
+        raise SystemExit(
+            "at least one confirmed cloud exceeded the replay alignment "
+            "spread"
         )
     if options.expected_power_strip_center is not None:
         expected_x, expected_y = options.expected_power_strip_center

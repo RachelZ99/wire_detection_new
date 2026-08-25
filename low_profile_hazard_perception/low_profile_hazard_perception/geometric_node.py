@@ -310,7 +310,11 @@ class GeometricHazardNode(InputHealthNode):
         )
         for confirmed in result.confirmed:
             self._cloud_publisher.publish(
-                _point_cloud(confirmed.points_odom, stamp_ns)
+                _point_cloud(
+                    confirmed.points_odom,
+                    stamp_ns,
+                    confirmed.spatial_spread_m,
+                )
             )
             self._cloud_publish_count += 1
         self._publish_health()
@@ -407,7 +411,9 @@ def _depth_values(message: Image) -> tuple[int, ...]:
 
 
 def _point_cloud(
-    points: tuple[tuple[float, float, float], ...], sensor_stamp_ns: int
+    points: tuple[tuple[float, float, float], ...],
+    sensor_stamp_ns: int,
+    confirmation_spread_m: float,
 ) -> PointCloud2:
     cloud = PointCloud2()
     cloud.header.stamp = Time(nanoseconds=sensor_stamp_ns).to_msg()
@@ -418,11 +424,19 @@ def _point_cloud(
         PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
         PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
         PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(
+            name="confirmation_spread",
+            offset=12,
+            datatype=PointField.FLOAT32,
+            count=1,
+        ),
     ]
     cloud.is_bigendian = False
-    cloud.point_step = 12
+    cloud.point_step = 16
     cloud.row_step = cloud.point_step * cloud.width
-    cloud.data = b"".join(struct.pack("<fff", *point) for point in points)
+    cloud.data = b"".join(
+        struct.pack("<ffff", *point, confirmation_spread_m) for point in points
+    )
     cloud.is_dense = True
     return cloud
 

@@ -160,7 +160,10 @@ Odom brackets wider than 100 ms or containing a 0.25 m/45° discontinuity cannot
 support alignment or confirmation.
 The resulting `sensor_msgs/PointCloud2` uses frame `odom` and the confirming
 observation's sensor stamp. The node publishes no slowdown, stop, or replanning
-command, and it exposes no candidate cloud on the operational topic.
+command, and it exposes no candidate cloud on the operational topic. Alongside
+standard `x/y/z`, each operational point carries the confirmation's
+`confirmation_spread` so replay can reject every misaligned event rather than
+only inspecting the last health snapshot.
 
 The internal field remains named `sensor_stamp_ns` intentionally: the current
 DCW2 profile has `use_hardware_time: false`, and the repository has not yet
