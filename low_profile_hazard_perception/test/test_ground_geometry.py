@@ -35,6 +35,85 @@ def _plane_depth_image(
 
 
 class ObservedGroundModelTests(unittest.TestCase):
+    def test_ambiguous_or_unobserved_ground_is_rejected_deterministically(
+        self,
+    ) -> None:
+        intrinsics = CameraIntrinsics(
+            width=160,
+            height=90,
+            fx=114.0,
+            fy=114.0,
+            cx=80.0,
+            cy=45.0,
+        )
+        first_plane = _plane_depth_image(
+            width=160,
+            height=90,
+            intrinsics=intrinsics,
+            camera_height_m=0.225,
+            downward_pitch_degrees=2.7,
+        )
+        second_plane = _plane_depth_image(
+            width=160,
+            height=90,
+            intrinsics=intrinsics,
+            camera_height_m=0.300,
+            downward_pitch_degrees=2.7,
+        )
+        estimator = GroundEstimator(
+            GroundEstimatorConfig(
+                sample_stride_px=2,
+                minimum_support=100,
+                minimum_inlier_ratio=0.70,
+                minimum_spatial_coverage=0.35,
+            )
+        )
+
+        competing = [
+            second if (index % intrinsics.width) // 10 % 2 else first
+            for index, (first, second) in enumerate(
+                zip(first_plane, second_plane, strict=True)
+            )
+        ]
+        competing_result = estimator.estimate(
+            competing,
+            intrinsics,
+            depth_unit_m=0.001,
+            nominal_camera_height_m=0.15,
+        )
+        self.assertFalse(competing_result.accepted)
+        self.assertEqual(
+            competing_result.reason, "ground inlier ratio is too low"
+        )
+
+        narrow_floor = list(first_plane)
+        for row in range(intrinsics.height):
+            for column in range(intrinsics.width):
+                if not 70 <= column < 90:
+                    narrow_floor[row * intrinsics.width + column] = 0
+        coverage_result = estimator.estimate(
+            narrow_floor,
+            intrinsics,
+            depth_unit_m=0.001,
+            nominal_camera_height_m=0.15,
+        )
+        self.assertFalse(coverage_result.accepted)
+        self.assertEqual(
+            coverage_result.reason, "ground spatial coverage is too small"
+        )
+
+        invalid_depth_result = estimator.estimate(
+            [0] * (intrinsics.width * intrinsics.height),
+            intrinsics,
+            depth_unit_m=0.001,
+            nominal_camera_height_m=0.15,
+        )
+        self.assertFalse(invalid_depth_result.accepted)
+        self.assertEqual(
+            invalid_depth_result.reason,
+            "insufficient valid floor samples",
+        )
+
     def test_valid_depth_reports_measured_ground_quality_not_nominal_height(
         self,
     ) -> None:

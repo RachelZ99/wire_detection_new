@@ -9,6 +9,7 @@ from low_profile_hazard_perception.health import (
     Stream,
     Transform,
     TransformBatchObservation,
+    geometric_projection_support_reason,
 )
 
 
@@ -154,6 +155,147 @@ class InputContractTests(unittest.TestCase):
         self.assertEqual(depth.frame_id, "camera_1_color_optical_frame")
         self.assertEqual(depth.processing_latency_ms, 6.0)
         self.assertTrue(snapshot.camera_info_consistency["depth"])
+
+    def test_projection_support_reports_missing_and_stale_prerequisites(
+        self,
+    ) -> None:
+        missing = HealthMonitor(expected_width=640, expected_height=360)
+        missing_snapshot = missing.snapshot(
+            sensor_now_ns=1_000_000_000,
+            receive_now_ns=10_000_000,
+        )
+        self.assertEqual(
+            geometric_projection_support_reason(missing_snapshot),
+            "camera_info:missing",
+        )
+        missing.observe_camera_info(
+            Stream.DEPTH_CAMERA_INFO,
+            CameraInfoObservation(
+                sensor_stamp_ns=1_000_000_000,
+                receive_time_ns=10_000_000,
+                frame_id="camera_1_color_optical_frame",
+                width=640,
+                height=360,
+                fx=455.0,
+                fy=455.0,
+                cx=320.0,
+                cy=180.0,
+            ),
+        )
+        self.assertEqual(
+            geometric_projection_support_reason(
+                missing.snapshot(
+                    sensor_now_ns=1_000_000_000,
+                    receive_now_ns=10_000_000,
+                )
+            ),
+            "tf:missing",
+        )
+
+        stale = HealthMonitor(expected_width=640, expected_height=360)
+        stale.observe_camera_info(
+            Stream.DEPTH_CAMERA_INFO,
+            CameraInfoObservation(
+                sensor_stamp_ns=1_000_000_000,
+                receive_time_ns=10_000_000,
+                frame_id="camera_1_color_optical_frame",
+                width=640,
+                height=360,
+                fx=455.0,
+                fy=455.0,
+                cx=320.0,
+                cy=180.0,
+            ),
+        )
+        stale.observe_odom(
+            OdomObservation(
+                sensor_stamp_ns=1_600_000_000,
+                receive_time_ns=20_000_000,
+                frame_id="odom",
+                child_frame_id="base_footprint",
+            )
+        )
+        transform = Transform(
+            parent_frame_id="base_footprint",
+            child_frame_id="camera_1_color_optical_frame",
+            translation=(0.33, 0.0, 0.15),
+            rotation=(0.0, 0.0, 0.0, 1.0),
+        )
+        for stream in (Stream.TF, Stream.TF_STATIC):
+            stale.observe_transforms(
+                stream,
+                TransformBatchObservation(
+                    sensor_stamp_ns=1_600_000_000,
+                    receive_time_ns=20_000_000,
+                    transforms=(transform,),
+                    required_chain_available=True,
+                ),
+            )
+        stale_snapshot = stale.snapshot(
+            sensor_now_ns=1_600_000_000,
+            receive_now_ns=20_000_000,
+        )
+
+        self.assertEqual(
+            geometric_projection_support_reason(stale_snapshot),
+            "camera_info:sensor_stale",
+        )
+
+        stale_tf = HealthMonitor(expected_width=640, expected_height=360)
+        stale_tf.observe_image(
+            Stream.DEPTH_IMAGE,
+            ImageObservation(
+                sensor_stamp_ns=1_600_000_000,
+                receive_time_ns=20_000_000,
+                frame_id="camera_1_color_optical_frame",
+                width=640,
+                height=360,
+                step=1280,
+                encoding="16UC1",
+                data_size=640 * 360 * 2,
+            ),
+        )
+        stale_tf.observe_camera_info(
+            Stream.DEPTH_CAMERA_INFO,
+            CameraInfoObservation(
+                sensor_stamp_ns=1_600_000_000,
+                receive_time_ns=20_000_000,
+                frame_id="camera_1_color_optical_frame",
+                width=640,
+                height=360,
+                fx=455.0,
+                fy=455.0,
+                cx=320.0,
+                cy=180.0,
+            ),
+        )
+        stale_tf.observe_odom(
+            OdomObservation(
+                sensor_stamp_ns=1_600_000_000,
+                receive_time_ns=20_000_000,
+                frame_id="odom",
+                child_frame_id="base_footprint",
+            )
+        )
+        for stream in (Stream.TF, Stream.TF_STATIC):
+            stale_tf.observe_transforms(
+                stream,
+                TransformBatchObservation(
+                    sensor_stamp_ns=1_000_000_000,
+                    receive_time_ns=20_000_000,
+                    transforms=(transform,),
+                    required_chain_available=True,
+                ),
+            )
+        self.assertEqual(
+            geometric_projection_support_reason(
+                stale_tf.snapshot(
+                    sensor_now_ns=1_600_000_000,
+                    receive_now_ns=20_000_000,
+                )
+            ),
+            "tf:sensor_stale",
+        )
 
     def test_invalid_dimensions_stride_encoding_and_camera_info_are_invalid(
         self,

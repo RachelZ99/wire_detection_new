@@ -31,11 +31,13 @@ from .health import (
     HealthSnapshot,
     HealthState,
     ImageObservation,
+    OdomObservation,
     Stream,
     TransformBatchObservation,
+    geometric_projection_support_reason,
 )
 from .node import InputHealthNode, _stamp_ns
-from .temporal import HazardTrackerConfig, Pose3
+from .temporal import ConfirmedHazard, HazardTrackerConfig, Pose3
 
 
 class GeometricHazardNode(InputHealthNode):
@@ -51,6 +53,10 @@ class GeometricHazardNode(InputHealthNode):
         self._latest_confirmation_spread_m: float | None = None
         self._cloud_publish_count = 0
         self._pending_depth_drop_count = 0
+        self._geometric_degradation_reason = ""
+        self._last_published_retained_signature: tuple[object, ...] = ()
+        self._had_operational_hazard_output = False
+        self._active_retained_count = 0
         super().__init__()
 
         ground_config = GroundEstimatorConfig(
@@ -135,6 +141,22 @@ class GeometricHazardNode(InputHealthNode):
                 )
                 * 1_000_000
             ),
+            candidate_retention_ns=int(
+                float(
+                    self.declare_parameter(
+                        "candidate_retention_ms", 500.0
+                    ).value
+                )
+                * 1_000_000
+            ),
+            confirmed_retention_ns=int(
+                float(
+                    self.declare_parameter(
+                        "confirmed_retention_ms", 2000.0
+                    ).value
+                )
+                * 1_000_000
+            ),
         )
         self._pipeline = GeometricHazardPipeline(
             ground_config=ground_config,
@@ -151,10 +173,21 @@ class GeometricHazardNode(InputHealthNode):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self._cloud_publisher = self.create_publisher(
             PointCloud2, cloud_topic, cloud_qos
+        )
+        retention_check_period_ms = float(
+            self.declare_parameter(
+                "retention_check_period_ms", 100.0
+            ).value
+        )
+        if retention_check_period_ms <= 0.0:
+            raise ValueError("retention_check_period_ms must be positive")
+        self._retention_timer = self.create_timer(
+            retention_check_period_ms / 1000.0,
+            self._publish_retained_at_sensor_now,
         )
 
     def _after_camera_info(
@@ -178,6 +211,7 @@ class GeometricHazardNode(InputHealthNode):
             or observation.fx <= 0.0
             or observation.fy <= 0.0
         ):
+            self._block_new_confirmation("camera_info:invalid")
             return
         self._pipeline.set_intrinsics(
             CameraIntrinsics(
@@ -198,10 +232,11 @@ class GeometricHazardNode(InputHealthNode):
             or message.header.frame_id != "odom"
             or message.child_frame_id != self._base_frame
         ):
+            self._block_new_confirmation("odom:invalid")
             return
         pose = message.pose.pose
         try:
-            self._pipeline.add_odom(
+            reason = self._pipeline.add_odom(
                 stamp_ns,
                 Pose3(
                     translation=(
@@ -218,7 +253,13 @@ class GeometricHazardNode(InputHealthNode):
                 ),
             )
         except ValueError:
+            self._block_new_confirmation("odom:invalid")
             return
+        if reason:
+            self._geometric_degradation_reason = reason
+
+    def _after_odom(self, observation: OdomObservation) -> None:
+        del observation
         self._try_process_pending_depth()
 
     def _after_tf(
@@ -230,6 +271,11 @@ class GeometricHazardNode(InputHealthNode):
     ) -> None:
         del stream, is_static, message
         if observation.input_error or not observation.required_chain_available:
+            self._block_new_confirmation(
+                "tf:invalid"
+                if observation.input_error
+                else "tf:chain_unavailable"
+            )
             return
         try:
             transform = self._tf_buffer.lookup_transform(
@@ -254,6 +300,7 @@ class GeometricHazardNode(InputHealthNode):
             self.get_logger().warning(
                 f"camera mounting transform is not usable: {error}"
             )
+            self._block_new_confirmation("tf:unusable")
             return
         self._try_process_pending_depth()
 
@@ -273,6 +320,7 @@ class GeometricHazardNode(InputHealthNode):
             or observation.step % 2 != 0
             or observation.data_size < observation.step * observation.height
         ):
+            self._block_new_confirmation("depth:invalid")
             return
         try:
             values = _depth_values(message)
@@ -290,34 +338,87 @@ class GeometricHazardNode(InputHealthNode):
         if self._pending_depth is None:
             return
         stamp_ns, values = self._pending_depth
+        snapshot = self._snapshot()
+        projection_reason = geometric_projection_support_reason(snapshot)
+        if projection_reason:
+            self._block_new_confirmation(projection_reason)
+            return
         if self._pipeline.alignment_at(stamp_ns) is None:
+            self._geometric_degradation_reason = (
+                self._pipeline.alignment_reason or "odom:missing"
+            )
+            self._publish_health()
             return
         self._pending_depth = None
         result = self._pipeline.process_depth(stamp_ns, values)
         if result is None:
+            self._geometric_degradation_reason = (
+                self._pipeline.alignment_reason or "odom:missing"
+            )
+            self._publish_health()
             return
+        self._geometric_degradation_reason = result.degradation_reason
         self._last_ground = result.ground
         self._last_nominal_ground_angle_error_degrees = (
             result.nominal_ground_angle_error_degrees
         )
         self._last_candidate_count = len(result.candidates)
-        if not result.confirmed:
-            self._publish_health()
-            return
-        self._confirmed_observation_count += len(result.confirmed)
-        self._latest_confirmation_spread_m = max(
-            confirmed.spatial_spread_m for confirmed in result.confirmed
-        )
-        for confirmed in result.confirmed:
-            self._cloud_publisher.publish(
-                _point_cloud(
-                    confirmed.points_odom,
-                    stamp_ns,
-                    confirmed.spatial_spread_m,
-                )
+        if result.confirmed:
+            self._confirmed_observation_count += len(result.confirmed)
+            self._latest_confirmation_spread_m = max(
+                confirmed.spatial_spread_m for confirmed in result.confirmed
             )
-            self._cloud_publish_count += 1
+        self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
         self._publish_health()
+
+    def _block_new_confirmation(self, reason: str) -> None:
+        self._pipeline.clear_candidates()
+        self._pipeline.suspend_confirmed_expiry()
+        self._geometric_degradation_reason = reason
+        self._publish_health()
+
+    def _publish_retained_at_sensor_now(self) -> None:
+        sensor_now_ns = self.get_clock().now().nanoseconds
+        snapshot = self._snapshot()
+        if (
+            snapshot.state is not HealthState.HEALTHY
+            or self._geometric_degradation_reason
+            or (self._last_ground is not None and not self._last_ground.accepted)
+        ):
+            self._pipeline.suspend_confirmed_expiry()
+        self._publish_retained(
+            self._pipeline.retained_at(sensor_now_ns),
+            sensor_now_ns=sensor_now_ns,
+        )
+
+    def _publish_retained(
+        self,
+        retained: tuple[ConfirmedHazard, ...],
+        *,
+        sensor_now_ns: int,
+    ) -> None:
+        signature: tuple[object, ...] = tuple(
+            (
+                hazard.sensor_stamp_ns,
+                hazard.points_odom,
+                hazard.spatial_spread_m,
+            )
+            for hazard in retained
+        )
+        if signature == self._last_published_retained_signature:
+            self._active_retained_count = len(retained)
+            return
+        if not retained and not self._had_operational_hazard_output:
+            self._last_published_retained_signature = signature
+            self._active_retained_count = 0
+            return
+        self._cloud_publisher.publish(
+            _point_cloud(retained, sensor_now_ns=sensor_now_ns)
+        )
+        self._cloud_publish_count += 1
+        self._had_operational_hazard_output = bool(retained)
+        self._active_retained_count = len(retained)
+        self._last_published_retained_signature = signature
 
     def _operational_hazard_output_enabled(self) -> bool:
         return True
@@ -325,11 +426,15 @@ class GeometricHazardNode(InputHealthNode):
     def _effective_health_state(self, snapshot: HealthSnapshot) -> HealthState:
         if snapshot.state is HealthState.INVALID:
             return HealthState.INVALID
-        if self._last_ground is not None and not self._last_ground.accepted:
+        if self._geometric_degradation_reason or (
+            self._last_ground is not None and not self._last_ground.accepted
+        ):
             return HealthState.DEGRADED
         return snapshot.state
 
     def _additional_health_reasons(self) -> tuple[str, ...]:
+        if self._geometric_degradation_reason:
+            return (self._geometric_degradation_reason,)
         if self._last_ground is None or self._last_ground.accepted:
             return ()
         return (f"ground:{self._last_ground.reason}",)
@@ -374,8 +479,23 @@ class GeometricHazardNode(InputHealthNode):
                 "geometry.pending_depth_drops": (
                     self._pending_depth_drop_count
                 ),
+                "geometry.active_retained_hazard_count": (
+                    self._active_retained_count
+                ),
+                "geometry.degradation_reason": (
+                    self._geometric_degradation_reason
+                ),
                 "geometry.alignment_frame": "odom",
                 "geometry.confirmation_observations": 2,
+                "geometry.candidate_retention_ms": (
+                    self._pipeline.tracker.config.candidate_retention_ns
+                    / 1_000_000
+                ),
+                "geometry.confirmed_retention_ms": (
+                    self._pipeline.tracker.config.confirmed_retention_ns
+                    / 1_000_000
+                ),
+                "geometry.output_durability": "transient_local",
                 "odom.maximum_interpolation_gap_ms": (
                     self._pipeline.odom.maximum_interpolation_gap_ns
                     / 1_000_000
@@ -411,13 +531,22 @@ def _depth_values(message: Image) -> tuple[int, ...]:
 
 
 def _point_cloud(
-    points: tuple[tuple[float, float, float], ...],
-    sensor_stamp_ns: int,
-    confirmation_spread_m: float,
+    retained: tuple[ConfirmedHazard, ...],
+    *,
+    sensor_now_ns: int,
 ) -> PointCloud2:
     cloud = PointCloud2()
-    cloud.header.stamp = Time(nanoseconds=sensor_stamp_ns).to_msg()
+    observation_stamp_ns = max(
+        (hazard.sensor_stamp_ns for hazard in retained),
+        default=sensor_now_ns,
+    )
+    cloud.header.stamp = Time(nanoseconds=observation_stamp_ns).to_msg()
     cloud.header.frame_id = "odom"
+    points = tuple(
+        (point, hazard.spatial_spread_m)
+        for hazard in retained
+        for point in hazard.points_odom
+    )
     cloud.height = 1
     cloud.width = len(points)
     cloud.fields = [
@@ -435,7 +564,8 @@ def _point_cloud(
     cloud.point_step = 16
     cloud.row_step = cloud.point_step * cloud.width
     cloud.data = b"".join(
-        struct.pack("<ffff", *point, confirmation_spread_m) for point in points
+        struct.pack("<ffff", *point, confirmation_spread_m)
+        for point, confirmation_spread_m in points
     )
     cloud.is_dense = True
     return cloud

@@ -31,7 +31,9 @@ class GeometricPipelineResult:
     ground: GroundEstimate
     candidates: tuple[GeometricCandidate, ...]
     confirmed: tuple[ConfirmedHazard, ...]
+    retained: tuple[ConfirmedHazard, ...]
     nominal_ground_angle_error_degrees: float | None
+    degradation_reason: str = ""
 
 
 class GeometricHazardPipeline:
@@ -52,6 +54,8 @@ class GeometricHazardPipeline:
         self.base_from_camera: Pose3 | None = None
         self.nominal_camera_height_m = 0.0
         self._last_aligned_observation_stamp_ns: int | None = None
+        self._pending_alignment_reason = ""
+        self._confirmed_expiry_suspended = False
 
     def set_intrinsics(self, intrinsics: CameraIntrinsics) -> None:
         self.intrinsics = intrinsics
@@ -60,16 +64,42 @@ class GeometricHazardPipeline:
         self.base_from_camera = pose.normalized()
         self.nominal_camera_height_m = abs(pose.translation[2])
 
-    def add_odom(self, sensor_stamp_ns: int, odom_from_base: Pose3) -> None:
-        self.odom.add(sensor_stamp_ns, odom_from_base)
+    @property
+    def alignment_reason(self) -> str:
+        return self._pending_alignment_reason
+
+    def add_odom(self, sensor_stamp_ns: int, odom_from_base: Pose3) -> str:
+        reason = self.odom.add(sensor_stamp_ns, odom_from_base)
+        if reason:
+            self.tracker.clear_candidates()
+            self._pending_alignment_reason = reason
+            self._confirmed_expiry_suspended = True
+        return reason
+
+    def retained_at(
+        self, sensor_now_ns: int
+    ) -> tuple[ConfirmedHazard, ...]:
+        return self.tracker.retained_at(
+            sensor_now_ns,
+            allow_confirmed_expiry=not self._confirmed_expiry_suspended,
+        )
+
+    def clear_candidates(self) -> None:
+        self.tracker.clear_candidates()
+
+    def suspend_confirmed_expiry(self) -> None:
+        self._confirmed_expiry_suspended = True
 
     def alignment_at(self, sensor_stamp_ns: int) -> Pose3 | None:
         if self.base_from_camera is None:
             return None
-        odom_from_base = self.odom.interpolate(sensor_stamp_ns)
-        if odom_from_base is None:
+        alignment = self.odom.alignment_at(sensor_stamp_ns)
+        if alignment.pose is None:
+            self.tracker.clear_candidates()
+            self._pending_alignment_reason = alignment.reason
+            self._confirmed_expiry_suspended = True
             return None
-        return odom_from_base.compose(self.base_from_camera)
+        return alignment.pose.compose(self.base_from_camera)
 
     def process_depth(
         self,
@@ -80,16 +110,27 @@ class GeometricHazardPipeline:
     ) -> GeometricPipelineResult | None:
         if self.intrinsics is None or self.base_from_camera is None:
             return None
-        odom_from_base = self.odom.interpolate(sensor_stamp_ns)
-        if odom_from_base is None:
+        alignment = self.odom.alignment_at(sensor_stamp_ns)
+        if alignment.pose is None:
+            self.tracker.clear_candidates()
+            self._pending_alignment_reason = alignment.reason
+            self._confirmed_expiry_suspended = True
             return None
+        odom_from_base = alignment.pose
+        degradation_reason = self._pending_alignment_reason
+        if degradation_reason:
+            self.tracker.clear_candidates()
+            self._pending_alignment_reason = ""
+            self._confirmed_expiry_suspended = True
         if (
             self._last_aligned_observation_stamp_ns is not None
             and not self.odom.continuous_between(
                 self._last_aligned_observation_stamp_ns, sensor_stamp_ns
             )
         ):
-            self.tracker.clear()
+            self.tracker.clear_candidates()
+            degradation_reason = "odom:discontinuous"
+            self._confirmed_expiry_suspended = True
         self._last_aligned_observation_stamp_ns = sensor_stamp_ns
         ground = self.ground_estimator.estimate(
             depth_values,
@@ -103,12 +144,19 @@ class GeometricHazardPipeline:
             )
         )
         if not ground.accepted:
+            self.tracker.clear_candidates()
+            self._confirmed_expiry_suspended = True
             return GeometricPipelineResult(
                 sensor_stamp_ns=sensor_stamp_ns,
                 ground=ground,
                 candidates=(),
                 confirmed=(),
+                retained=self.tracker.retained_at(
+                    sensor_stamp_ns,
+                    allow_confirmed_expiry=False,
+                ),
                 nominal_ground_angle_error_degrees=nominal_angle_error,
+                degradation_reason=f"ground:{ground.reason}",
             )
         observed_base_from_camera = self.base_from_camera.with_observed_ground(
             ground.model.normal, ground.model.camera_height_m
@@ -133,13 +181,25 @@ class GeometricHazardPipeline:
                         points_odom=points_odom,
                         evidence=EvidenceSource.STRONG_GEOMETRY,
                         confidence=candidate.confidence,
-                    )
+                    ),
+                    allow_confirmed_expiry=(
+                        not self._confirmed_expiry_suspended
+                    ),
                 )
             )
+        if confirmed and not degradation_reason:
+            self._confirmed_expiry_suspended = False
         return GeometricPipelineResult(
             sensor_stamp_ns=sensor_stamp_ns,
             ground=ground,
             candidates=candidates,
             confirmed=tuple(confirmed),
+            retained=self.tracker.retained_at(
+                sensor_stamp_ns,
+                allow_confirmed_expiry=(
+                    not self._confirmed_expiry_suspended
+                ),
+            ),
             nominal_ground_angle_error_degrees=nominal_angle_error,
+            degradation_reason=degradation_reason,
         )

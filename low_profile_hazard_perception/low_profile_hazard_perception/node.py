@@ -342,7 +342,11 @@ class InputHealthNode(Node):
 
     def _process_odom(self, observation: OdomObservation) -> int:
         self._monitor.observe_odom(observation)
+        self._after_odom(observation)
         return observation.receive_time_ns
+
+    def _after_odom(self, observation: OdomObservation) -> None:
+        """Extension seam after odom health has observed the sample."""
 
     def _on_tf(
         self, stream: Stream, is_static: bool, message: TFMessage

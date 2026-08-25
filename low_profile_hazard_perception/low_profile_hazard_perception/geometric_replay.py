@@ -47,7 +47,7 @@ class _Collector(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=100,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.create_subscription(
             DiagnosticArray, health_topic, self._collect_health, health_qos
@@ -80,9 +80,16 @@ class _Collector(Node):
         confirmation_spread_m = None
         if spread_field is not None and message.data:
             confirmation_spread_m = round(
-                struct.unpack_from(
-                    "<f", bytes(message.data), spread_field.offset
-                )[0],
+                max(
+                    struct.unpack_from(
+                        "<f",
+                        bytes(message.data),
+                        offset + spread_field.offset,
+                    )[0]
+                    for offset in range(
+                        0, len(message.data), int(message.point_step)
+                    )
+                ),
                 6,
             )
         points = [
@@ -119,6 +126,7 @@ class _Collector(Node):
                     else None
                 ),
                 "confirmation_spread_m": confirmation_spread_m,
+                "clearing": not points,
             }
         )
 
@@ -312,20 +320,18 @@ def main(args: list[str] | None = None) -> None:
                 )
             )
     clouds = baseline["clouds"]
-    if not clouds:
+    hazard_clouds = [cloud for cloud in clouds if not cloud["clearing"]]
+    if not hazard_clouds:
         raise SystemExit("reference replay produced no confirmed hazard cloud")
     if any(
         cloud["frame_id"] != "odom"
         or cloud["stamp_ns"] <= 0
-        or cloud["point_count"] <= 0
         for cloud in clouds
     ):
-        raise SystemExit(
-            "operational clouds must be non-empty, stamped in odom"
-        )
+        raise SystemExit("operational clouds must be stamped in odom")
     strong_clouds = [
         cloud
-        for cloud in clouds
+        for cloud in hazard_clouds
         if cloud["p20_height_m"] is not None
         and cloud["p20_height_m"] >= 0.014
         and cloud["p90_height_m"] <= 0.151
@@ -336,14 +342,14 @@ def main(args: list[str] | None = None) -> None:
             "reference replay produced no robustly supported strong "
             "protrusion cloud"
         )
-    if any(cloud["horizontal_span_m"] > 0.75 for cloud in clouds):
+    if any(cloud["horizontal_span_m"] > 0.75 for cloud in hazard_clouds):
         raise SystemExit(
             "an operational cloud has a trail-like spatial extent"
         )
     if any(
         cloud["confirmation_spread_m"] is None
         or cloud["confirmation_spread_m"] > options.maximum_alignment_spread
-        for cloud in clouds
+        for cloud in hazard_clouds
     ):
         raise SystemExit(
             "at least one confirmed cloud exceeded the replay alignment "
@@ -371,7 +377,7 @@ def main(args: list[str] | None = None) -> None:
         persistent_count = sum(
             minimum_x <= cloud["centroid_x_m"] <= maximum_x
             and minimum_y <= cloud["centroid_y_m"] <= maximum_y
-            for cloud in clouds
+            for cloud in hazard_clouds
         )
         if persistent_count >= 2:
             raise SystemExit(
@@ -401,7 +407,8 @@ def main(args: list[str] | None = None) -> None:
         {
             "repeat_count": options.repeat,
             "measured_camera_height_m": measured_height,
-            "confirmed_cloud_count": len(clouds),
+            "confirmed_cloud_count": len(hazard_clouds),
+            "clearing_cloud_count": len(clouds) - len(hazard_clouds),
             "canonical": baseline,
             "runs": results,
         },

@@ -177,6 +177,30 @@ class HealthSnapshot:
         }
 
 
+def geometric_projection_support_reason(snapshot: HealthSnapshot) -> str:
+    """Explain why depth evidence cannot be projected into ``odom``."""
+    required = (
+        (Stream.DEPTH_CAMERA_INFO, "camera_info"),
+        (Stream.TF, "tf"),
+        (Stream.TF_STATIC, "tf_static"),
+        (Stream.ODOM, "odom"),
+    )
+    for stream, label in required:
+        if stream in snapshot.missing_streams:
+            return f"{label}:missing"
+        if stream in snapshot.invalid_streams:
+            return f"{label}:invalid"
+        if stream in snapshot.stale_sensor_streams:
+            return f"{label}:sensor_stale"
+        if stream in snapshot.stale_receive_streams:
+            return f"{label}:receive_stale"
+    if snapshot.camera_info_consistency["depth"] is not True:
+        return "camera_info:inconsistent"
+    if snapshot.tf_chain_available is not True:
+        return "tf:chain_unavailable"
+    return ""
+
+
 @dataclass
 class _StreamRecord:
     delivered_count: int = 0

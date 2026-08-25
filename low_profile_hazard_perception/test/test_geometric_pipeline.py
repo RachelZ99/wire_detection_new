@@ -130,6 +130,89 @@ class GeometricPipelineTests(unittest.TestCase):
         assert after_outage is not None
         self.assertEqual(len(after_outage.candidates), 1)
         self.assertEqual(after_outage.confirmed, ())
+        self.assertEqual(after_outage.degradation_reason, "odom:discontinuous")
+
+    def test_ground_failure_retains_a_confirmed_hazard(self) -> None:
+        depth, intrinsics = _scene(raised=True, reflective_hole=False)
+        pipeline = _pipeline(intrinsics)
+        pipeline.add_odom(1_250_000_000, Pose3.identity())
+        first = pipeline.process_depth(1_000_000_000, depth)
+        second = pipeline.process_depth(1_100_000_000, depth)
+        assert first is not None and second is not None
+        self.assertEqual(len(second.confirmed), 1)
+
+        failed = pipeline.process_depth(
+            1_200_000_000,
+            [0] * (intrinsics.width * intrinsics.height),
+        )
+
+        assert failed is not None
+        self.assertFalse(failed.ground.accepted)
+        self.assertEqual(failed.confirmed, ())
+        self.assertEqual(len(failed.retained), 1)
+        self.assertEqual(
+            failed.retained[0].points_odom,
+            second.confirmed[0].points_odom,
+        )
+        self.assertEqual(
+            failed.retained[0].sensor_stamp_ns,
+            second.confirmed[0].sensor_stamp_ns,
+        )
+        self.assertEqual(
+            failed.degradation_reason,
+            "ground:insufficient valid floor samples",
+        )
+
+        pipeline.add_odom(1_350_000_000, Pose3.identity())
+        recovered = pipeline.process_depth(1_300_000_000, depth)
+
+        assert recovered is not None
+        self.assertTrue(recovered.ground.accepted, recovered.ground.reason)
+        self.assertEqual(len(recovered.confirmed), 1)
+        self.assertEqual(len(recovered.retained), 1)
+        self.assertEqual(recovered.retained[0].observation_count, 3)
+        self.assertEqual(recovered.degradation_reason, "")
+
+        pipeline.suspend_confirmed_expiry()
+        self.assertEqual(len(pipeline.retained_at(4_000_000_000)), 1)
+
+    def test_odom_discontinuity_retains_confirmed_but_restarts_candidates(
+        self,
+    ) -> None:
+        depth, intrinsics = _scene(raised=True, reflective_hole=False)
+        pipeline = _pipeline(intrinsics)
+        first = pipeline.process_depth(1_000_000_000, depth)
+        confirmed = pipeline.process_depth(1_100_000_000, depth)
+        assert first is not None and confirmed is not None
+        self.assertEqual(len(confirmed.confirmed), 1)
+        pipeline.add_odom(1_350_000_000, Pose3.identity())
+        pipeline.add_odom(1_450_000_000, Pose3.identity())
+
+        recovered = pipeline.process_depth(1_400_000_000, depth)
+
+        assert recovered is not None
+        # The already-confirmed track may receive a spatially bounded refresh;
+        # the discontinuity must not let an unconfirmed pre-gap candidate turn
+        # into a newly confirmed hazard.
+        self.assertEqual(len(recovered.confirmed), 1)
+        self.assertEqual(len(recovered.retained), 1)
+        self.assertEqual(recovered.degradation_reason, "odom:discontinuous")
+
+    def test_disordered_odom_prevents_cross_frame_confirmation(self) -> None:
+        depth, intrinsics = _scene(raised=True, reflective_hole=False)
+        pipeline = _pipeline(intrinsics)
+        first = pipeline.process_depth(1_000_000_000, depth)
+        assert first is not None
+        self.assertEqual(first.confirmed, ())
+
+        reason = pipeline.add_odom(1_040_000_000, Pose3.identity())
+        second = pipeline.process_depth(1_100_000_000, depth)
+
+        self.assertEqual(reason, "odom:disordered")
+        assert second is not None
+        self.assertEqual(len(second.candidates), 1)
+        self.assertEqual(second.confirmed, ())
+        self.assertEqual(second.degradation_reason, "odom:disordered")
 
 
 if __name__ == "__main__":

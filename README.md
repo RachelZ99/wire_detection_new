@@ -1,9 +1,10 @@
 # Low-Profile Hazard Perception
 
 This repository is the new asynchronous RGB-D perception project described in
-the PRD and ADRs. Ticket 2 adds a depth-only strong-geometry path: it observes
-the floor, aligns each depth observation at its own timestamp in `odom`, and
-publishes only twice-confirmed low-profile hazards.
+the PRD and ADRs. The current depth-only path observes the floor, aligns each
+depth observation at its own timestamp in `odom`, publishes only twice-confirmed
+low-profile hazards, and conservatively retains them through the measured
+observation blind zone and sensing degradation.
 
 ## Supported environment
 
@@ -169,3 +170,26 @@ The internal field remains named `sensor_stamp_ns` intentionally: the current
 DCW2 profile has `use_hardware_time: false`, and the repository has not yet
 proved clock offset/drift compensation needed to call this a true capture time.
 Host receipt/callback time is never substituted for it.
+
+## Conservative degradation and retention
+
+Unconfirmed candidates expire after 500 ms and can only confirm inside the
+separate 350 ms confirmation window. Confirmed hazards use an independently
+configured retention floor of 2000 ms; configurations below two seconds are
+rejected. The operational topic is transient-local and represents the current
+retained set. A non-empty set is republished only when its observations change,
+and one stamped empty cloud clears it after safe expiry, keeping deterministic
+replay independent of timer frequency.
+
+Ground rejection, missing/stale/invalid CameraInfo or TF, and missing, stale,
+disordered, gapped, or discontinuous odom block new cross-frame confirmation
+and publish a machine-readable diagnostic reason. These states clear candidate
+accumulation but never clear a retained confirmed hazard. Confirmed expiry is
+suspended while health cannot support a safe interpretation; a spatially
+consistent observation after recovery refreshes the same retained hazard rather
+than duplicating or teleporting it.
+
+The configured retention and current behavior are visible as
+`geometry.candidate_retention_ms`, `geometry.confirmed_retention_ms`,
+`geometry.active_retained_hazard_count`, `geometry.degradation_reason`, and
+`geometry.output_durability` in the health diagnostic.

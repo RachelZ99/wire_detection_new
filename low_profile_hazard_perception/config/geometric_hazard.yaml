@@ -41,3 +41,8 @@ geometric_hazard:
     # Confirmation happens only after observation-time alignment in odom.
     association_radius_m: 0.08
     confirmation_window_ms: 350.0
+    candidate_retention_ms: 500.0
+    # Safety floor: confirmed hazards survive the measured observation blind
+    # zone for at least two seconds, even while sensing is degraded.
+    confirmed_retention_ms: 2000.0
+    retention_check_period_ms: 100.0

@@ -126,6 +126,12 @@ def _depth(stamp: object, *, object_center_column: int) -> Image:
     return message
 
 
+def _invalid_depth(stamp: object) -> Image:
+    message = _depth(stamp, object_center_column=360)
+    message.data = bytes(message.step * message.height)
+    return message
+
+
 def _odom(stamp: object, x: float) -> Odometry:
     message = Odometry()
     message.header.stamp = stamp
@@ -272,6 +278,53 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         assert 0.20 < float(values["ground.camera_height_m"]) < 0.25
         assert values["geometry.alignment_frame"] == "odom"
         assert values["geometry.confirmation_observations"] == "2"
+        assert values["geometry.active_retained_hazard_count"] == "1"
+        assert values["geometry.candidate_retention_ms"] == "500.000"
+        assert values["geometry.confirmed_retention_ms"] == "2000.000"
+        assert values["geometry.output_durability"] == "transient_local"
+
+        failure_stamp = Time(nanoseconds=base_ns + 400_000_000).to_msg()
+        publishers["odom"].publish(
+            _odom(Time(nanoseconds=base_ns + 450_000_000).to_msg(), 0.1)
+        )
+        executor.spin_once(timeout_sec=0.02)
+        publishers["depth"].publish(_invalid_depth(failure_stamp))
+        _spin_until(
+            executor,
+            lambda: _values(health).get("ground.state") == "REJECTED",
+        )
+        values = _values(health)
+        assert values["state"] == "DEGRADED"
+        assert values["geometry.active_retained_hazard_count"] == "1"
+        assert values["geometry.degradation_reason"].startswith("ground:")
+        assert len(clouds) == 1
+
+        recovery_stamp = Time(nanoseconds=base_ns + 500_000_000).to_msg()
+        publishers["odom"].publish(
+            _odom(Time(nanoseconds=base_ns + 550_000_000).to_msg(), 0.1)
+        )
+        executor.spin_once(timeout_sec=0.02)
+        publishers["depth"].publish(
+            _depth(recovery_stamp, object_center_column=302)
+        )
+        _spin_until(
+            executor,
+            lambda: len(clouds) == 2
+            and _values(health).get("geometry.degradation_reason") == "",
+        )
+        recovered_points = [
+            struct.unpack_from("<fff", bytes(clouds[-1].data), offset)
+            for offset in range(
+                0, len(clouds[-1].data), clouds[-1].point_step
+            )
+        ]
+        recovered_centroid_x = sum(
+            point[0] for point in recovered_points
+        ) / len(recovered_points)
+        assert abs(recovered_centroid_x - centroid_x) < 0.025
+        values = _values(health)
+        assert values["geometry.active_retained_hazard_count"] == "1"
+        assert values["geometry.degradation_reason"] == ""
     finally:
         executor.remove_node(driver)
         executor.remove_node(perception)

@@ -14,6 +14,12 @@ Quaternion = tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
+class OdomAlignment:
+    pose: Pose3 | None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class Pose3:
     """Rigid transform whose translation and quaternion map local to parent."""
 
@@ -103,6 +109,7 @@ class OdomPoseCache:
         self._maximum_rotation_jump_degrees = maximum_rotation_jump_degrees
         self._stamps: list[int] = []
         self._poses: list[Pose3] = []
+        self._last_arrival_stamp_ns: int | None = None
 
     @property
     def latest_stamp_ns(self) -> int | None:
@@ -120,10 +127,16 @@ class OdomPoseCache:
     def maximum_rotation_jump_degrees(self) -> float:
         return self._maximum_rotation_jump_degrees
 
-    def add(self, sensor_stamp_ns: int, pose: Pose3) -> None:
+    def add(self, sensor_stamp_ns: int, pose: Pose3) -> str:
         if sensor_stamp_ns <= 0:
             raise ValueError("odom sensor stamp must be positive")
+        if (
+            self._last_arrival_stamp_ns is not None
+            and sensor_stamp_ns < self._last_arrival_stamp_ns
+        ):
+            return "odom:disordered"
         pose = pose.normalized()
+        self._last_arrival_stamp_ns = sensor_stamp_ns
         index = bisect_left(self._stamps, sensor_stamp_ns)
         if (
             index < len(self._stamps)
@@ -143,10 +156,14 @@ class OdomPoseCache:
         if overflow > 0:
             del self._stamps[:overflow]
             del self._poses[:overflow]
+        return ""
 
     def interpolate(self, sensor_stamp_ns: int) -> Pose3 | None:
+        return self.alignment_at(sensor_stamp_ns).pose
+
+    def alignment_at(self, sensor_stamp_ns: int) -> OdomAlignment:
         if len(self._stamps) < 2:
-            return None
+            return OdomAlignment(None, "odom:missing")
         upper = bisect_left(self._stamps, sensor_stamp_ns)
         if (
             upper < len(self._stamps)
@@ -158,12 +175,14 @@ class OdomPoseCache:
                 upper + 1 < len(self._stamps)
                 and self._segment_is_supported(upper, upper + 1)
             )
-            return self._poses[upper] if supported else None
+            if supported:
+                return OdomAlignment(self._poses[upper])
+            return OdomAlignment(None, "odom:discontinuous")
         if upper == 0 or upper == len(self._stamps):
-            return None
+            return OdomAlignment(None, "odom:stale")
         lower = upper - 1
         if not self._segment_is_supported(lower, upper):
-            return None
+            return OdomAlignment(None, "odom:discontinuous")
         interval = self._stamps[upper] - self._stamps[lower]
         fraction = (sensor_stamp_ns - self._stamps[lower]) / interval
         first = self._poses[lower]
@@ -173,9 +192,11 @@ class OdomPoseCache:
             + fraction * (second.translation[index] - first.translation[index])
             for index in range(3)
         )
-        return Pose3(
-            translation=translation,
-            rotation=_slerp(first.rotation, second.rotation, fraction),
+        return OdomAlignment(
+            Pose3(
+                translation=translation,
+                rotation=_slerp(first.rotation, second.rotation, fraction),
+            )
         )
 
     def continuous_between(
@@ -266,10 +287,20 @@ class ConfirmedHazard:
 class HazardTrackerConfig:
     association_radius_m: float = 0.08
     confirmation_window_ns: int = 350_000_000
+    candidate_retention_ns: int = 500_000_000
+    confirmed_retention_ns: int = 2_000_000_000
 
     def __post_init__(self) -> None:
         if self.association_radius_m <= 0.0:
             raise ValueError("association_radius_m must be positive")
+        if self.confirmation_window_ns <= 0:
+            raise ValueError("confirmation_window_ns must be positive")
+        if self.candidate_retention_ns <= 0:
+            raise ValueError("candidate_retention_ns must be positive")
+        if self.confirmed_retention_ns < 2_000_000_000:
+            raise ValueError(
+                "confirmed_retention_ns must be at least two seconds"
+            )
 
 
 @dataclass
@@ -280,6 +311,7 @@ class _Track:
     latest_points: tuple[Point3, ...]
     evidence: set[EvidenceSource] = field(default_factory=set)
     confidence: float = 0.0
+    confirmed: bool = False
 
     @property
     def centroid(self) -> Point3:
@@ -300,22 +332,54 @@ class HazardTracker:
     def clear(self) -> None:
         self._tracks.clear()
 
+    def clear_candidates(self) -> None:
+        """Discard unconfirmed accumulation without clearing known hazards."""
+        self._tracks = [track for track in self._tracks if track.confirmed]
+
+    def retained_at(
+        self,
+        sensor_now_ns: int,
+        *,
+        allow_confirmed_expiry: bool = True,
+    ) -> tuple[ConfirmedHazard, ...]:
+        """Return confirmed hazards still retained at a sensor-clock time."""
+        self._expire_at(
+            sensor_now_ns,
+            expire_confirmed=allow_confirmed_expiry,
+        )
+        return tuple(
+            self._confirmed_hazard(track)
+            for track in self._tracks
+            if track.confirmed
+        )
+
+    def candidate_count_at(self, sensor_now_ns: int) -> int:
+        """Return live unconfirmed tracks using candidate expiry only."""
+        self._expire_at(sensor_now_ns, expire_confirmed=False)
+        return sum(not track.confirmed for track in self._tracks)
+
     def observe(
-        self, observation: HazardObservation
+        self,
+        observation: HazardObservation,
+        *,
+        allow_confirmed_expiry: bool = True,
     ) -> tuple[ConfirmedHazard, ...]:
         if observation.sensor_stamp_ns <= 0:
             return ()
         centroid = observation.centroid
-        self._tracks = [
-            track
-            for track in self._tracks
-            if observation.sensor_stamp_ns - track.last_stamp_ns
-            <= self.config.confirmation_window_ns
-        ]
+        self._expire_at(
+            observation.sensor_stamp_ns,
+            expire_confirmed=allow_confirmed_expiry,
+        )
         matching = [
             (self._distance(centroid, track.centroid), track)
             for track in self._tracks
             if track.last_stamp_ns < observation.sensor_stamp_ns
+            and (
+                track.confirmed
+                or observation.sensor_stamp_ns - track.last_stamp_ns
+                <= self.config.confirmation_window_ns
+            )
         ]
         matching = [
             item
@@ -341,22 +405,42 @@ class HazardTracker:
             self._tracks.append(track)
         if len(track.observation_centroids) < 2:
             return ()
+        track.confirmed = True
+        return (self._confirmed_hazard(track),)
+
+    def _expire_at(
+        self, sensor_now_ns: int, *, expire_confirmed: bool = True
+    ) -> None:
+        self._tracks = [
+            track
+            for track in self._tracks
+            if (
+                track.confirmed
+                and not expire_confirmed
+                or sensor_now_ns - track.last_stamp_ns
+                <= (
+                    self.config.confirmed_retention_ns
+                    if track.confirmed
+                    else self.config.candidate_retention_ns
+                )
+            )
+        ]
+
+    def _confirmed_hazard(self, track: _Track) -> ConfirmedHazard:
         spread = max(
             self._distance(point, track.centroid)
             for point in track.observation_centroids
         )
-        return (
-            ConfirmedHazard(
-                sensor_stamp_ns=observation.sensor_stamp_ns,
-                points_odom=track.latest_points,
-                centroid=track.centroid,
-                observation_count=len(track.observation_centroids),
-                evidence=tuple(
-                    sorted(track.evidence, key=lambda item: item.value)
-                ),
-                confidence=track.confidence,
-                spatial_spread_m=spread,
+        return ConfirmedHazard(
+            sensor_stamp_ns=track.last_stamp_ns,
+            points_odom=track.latest_points,
+            centroid=track.centroid,
+            observation_count=len(track.observation_centroids),
+            evidence=tuple(
+                sorted(track.evidence, key=lambda item: item.value)
             ),
+            confidence=track.confidence,
+            spatial_spread_m=spread,
         )
 
     @staticmethod

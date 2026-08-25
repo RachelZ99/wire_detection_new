@@ -99,6 +99,80 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
 
         self.assertEqual(confirmed, ())
 
+    def test_confirmed_hazard_outlives_candidate_and_is_not_duplicated(
+        self,
+    ) -> None:
+        tracker = HazardTracker(
+            HazardTrackerConfig(
+                association_radius_m=0.08,
+                confirmation_window_ns=350_000_000,
+                candidate_retention_ns=500_000_000,
+                confirmed_retention_ns=2_000_000_000,
+            )
+        )
+        first = HazardObservation(
+            sensor_stamp_ns=1_000_000_000,
+            points_odom=((0.8, 0.2, 0.04),),
+            evidence=EvidenceSource.STRONG_GEOMETRY,
+            confidence=0.9,
+        )
+        second = HazardObservation(
+            sensor_stamp_ns=1_100_000_000,
+            points_odom=((0.81, 0.2, 0.04),),
+            evidence=EvidenceSource.STRONG_GEOMETRY,
+            confidence=0.95,
+        )
+
+        self.assertEqual(tracker.observe(first), ())
+        self.assertEqual(len(tracker.observe(second)), 1)
+
+        # The candidate lifetime has elapsed, but the confirmed hazard remains
+        # available throughout the observation blind zone retention interval.
+        retained = tracker.retained_at(1_700_000_000)
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].observation_count, 2)
+
+        recovered = HazardObservation(
+            sensor_stamp_ns=1_800_000_000,
+            points_odom=((0.805, 0.2, 0.04),),
+            evidence=EvidenceSource.STRONG_GEOMETRY,
+            confidence=0.92,
+        )
+        self.assertEqual(len(tracker.observe(recovered)), 1)
+        retained = tracker.retained_at(1_800_000_000)
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].observation_count, 3)
+
+        self.assertEqual(
+            len(
+                tracker.retained_at(
+                    3_800_000_001, allow_confirmed_expiry=False
+                )
+            ),
+            1,
+        )
+        self.assertEqual(tracker.retained_at(3_800_000_001), ())
+
+    def test_unconfirmed_candidate_uses_its_own_short_retention(self) -> None:
+        tracker = HazardTracker(
+            HazardTrackerConfig(
+                candidate_retention_ns=500_000_000,
+                confirmed_retention_ns=2_000_000_000,
+            )
+        )
+        tracker.observe(
+            HazardObservation(
+                sensor_stamp_ns=1_000_000_000,
+                points_odom=((0.8, 0.2, 0.04),),
+                evidence=EvidenceSource.STRONG_GEOMETRY,
+                confidence=0.9,
+            )
+        )
+
+        self.assertEqual(tracker.candidate_count_at(1_500_000_000), 1)
+        self.assertEqual(tracker.candidate_count_at(1_500_000_001), 0)
+        self.assertEqual(tracker.retained_at(1_500_000_001), ())
+
     def test_stale_or_discontinuous_odom_cannot_support_alignment(
         self,
     ) -> None:
@@ -121,6 +195,49 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
             Pose3(translation=(0.50, 0.0, 0.0), rotation=_yaw(0.0)),
         )
         self.assertIsNone(jumped.interpolate(1_040_000_000))
+
+    def test_odom_alignment_reports_missing_stale_and_discontinuous_support(
+        self,
+    ) -> None:
+        cache = OdomPoseCache()
+        self.assertEqual(
+            cache.alignment_at(1_000_000_000).reason, "odom:missing"
+        )
+        cache.add(1_000_000_000, Pose3.identity())
+        cache.add(1_080_000_000, Pose3.identity())
+
+        self.assertEqual(
+            cache.alignment_at(1_200_000_000).reason, "odom:stale"
+        )
+
+        discontinuous = OdomPoseCache()
+        discontinuous.add(1_000_000_000, Pose3.identity())
+        discontinuous.add(1_300_000_000, Pose3.identity())
+        self.assertEqual(
+            discontinuous.alignment_at(1_150_000_000).reason,
+            "odom:discontinuous",
+        )
+
+    def test_disordered_odom_is_rejected_with_a_reason(self) -> None:
+        cache = OdomPoseCache()
+        self.assertEqual(cache.add(1_000_000_000, Pose3.identity()), "")
+        self.assertEqual(
+            cache.add(
+                1_100_000_000,
+                Pose3((0.1, 0.0, 0.0), Pose3.identity().rotation),
+            ),
+            "",
+        )
+
+        reason = cache.add(
+            1_050_000_000,
+            Pose3((9.0, 0.0, 0.0), Pose3.identity().rotation),
+        )
+
+        self.assertEqual(reason, "odom:disordered")
+        pose = cache.interpolate(1_050_000_000)
+        assert pose is not None
+        self.assertAlmostEqual(pose.translation[0], 0.05)
 
 
 if __name__ == "__main__":
