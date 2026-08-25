@@ -2,7 +2,7 @@
 <package format="3">
   <name>low_profile_hazard_perception</name>
   <version>0.1.0</version>
-  <description>Asynchronous RGB-D input health and deterministic replay seam.</description>
+  <description>Asynchronous RGB-D health and odom-aligned geometric hazards.</description>
   <maintainer email="maintainers@example.invalid">Low-profile perception maintainers</maintainer>
   <license>Apache-2.0</license>
 
@@ -17,6 +17,7 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ros2bag</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
   <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
 

@@ -23,13 +23,17 @@ setup(
     maintainer="Low-profile perception maintainers",
     maintainer_email="maintainers@example.invalid",
     description=(
-        "Asynchronous RGB-D input health and deterministic replay seam."
+        "Asynchronous RGB-D health and odom-aligned geometric hazards."
     ),
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
             "input_health_node = low_profile_hazard_perception.node:main",
+            "geometric_hazard_node = "
+            "low_profile_hazard_perception.geometric_node:main",
             "replay_rgbd_health = low_profile_hazard_perception.replay:main",
+            "replay_geometric_hazard = "
+            "low_profile_hazard_perception.geometric_replay:main",
         ],
     },
 )

@@ -1,0 +1,42 @@
+geometric_hazard:
+  ros__parameters:
+    expected_width: 640
+    expected_height: 360
+    sensor_stale_after_ms: 500.0
+    receive_stale_after_ms: 500.0
+    health_publish_period_ms: 200.0
+    input_processing_period_ms: 5.0
+    camera_frame: camera_1_color_optical_frame
+    base_frame: base_footprint
+    color_image_topic: /camera_1/color/image_raw
+    color_camera_info_topic: /camera_1/color/camera_info
+    depth_image_topic: /camera_1/depth/image_raw
+    depth_camera_info_topic: /camera_1/depth/camera_info
+    odom_topic: /odom
+    tf_topic: /tf
+    tf_static_topic: /tf_static
+    health_topic: /low_profile_hazard_perception/health
+    hazard_cloud_topic: /low_profile_hazard_perception/confirmed_hazards
+
+    # Observed-ground profile for the measured 640x360 DCW2 stream.
+    ground_sample_stride_px: 6
+    ground_ransac_iterations: 160
+    ground_ransac_score_max_samples: 1200
+    ground_inlier_threshold_m: 0.008
+    ground_minimum_support: 500
+    ground_minimum_inlier_ratio: 0.70
+    ground_maximum_p90_residual_m: 0.008
+    ground_minimum_spatial_coverage: 0.35
+    ground_temporal_smoothing_factor: 0.35
+
+    # Strong geometry begins at 15 mm and must have local metric support.
+    geometry_sample_stride_px: 2
+    strong_height_m: 0.015
+    maximum_hazard_height_m: 0.15
+    strong_minimum_support_points: 18
+    strong_minimum_spatial_span_m: 0.04
+    geometry_cluster_cell_m: 0.04
+
+    # Confirmation happens only after observation-time alignment in odom.
+    association_radius_m: 0.08
+    confirmation_window_ms: 350.0

@@ -1,8 +1,9 @@
 # Low-Profile Hazard Perception
 
 This repository is the new asynchronous RGB-D perception project described in
-the PRD and ADRs. Ticket 1 establishes the input-health and replay boundary; it
-does not detect or publish hazards yet.
+the PRD and ADRs. Ticket 2 adds a depth-only strong-geometry path: it observes
+the floor, aligns each depth observation at its own timestamp in `odom`, and
+publishes only twice-confirmed low-profile hazards.
 
 ## Supported environment
 
@@ -37,6 +38,10 @@ PYTHONPATH=low_profile_hazard_perception \
   -s low_profile_hazard_perception/test -p 'test_health_monitor.py'
 ```
 
+The geometry and temporal contracts can be checked the same way with
+`test_ground_geometry.py`, `test_geometric_pipeline.py`, and
+`test_temporal_alignment.py`.
+
 ## Deterministic reference replay
 
 The reference bag is an external test artifact named `wire_rgbd_strip_01`; it
@@ -49,6 +54,21 @@ ros2 run low_profile_hazard_perception replay_rgbd_health \
   --repeat 2 \
   --output reference-health.json
 ```
+
+Run the ticket-2 operational replay separately:
+
+```bash
+ros2 run low_profile_hazard_perception replay_geometric_hazard \
+  /path/to/wire_rgbd_strip_01 \
+  --repeat 2 \
+  --output reference-geometric-hazard.json
+```
+
+This replay additionally requires at least one non-empty, meaningfully stamped
+`odom` point cloud, deterministic point bytes and timestamps across runs, and
+an observed camera-to-floor distance in the measured 0.20–0.25 m range. The
+nominal 0.15 m TF value is reported as a consistency comparison, not used as
+floor truth.
 
 The command starts a clean input-health node for each pass, replays with ROS
 simulation time, and fails if delivered input counts or canonical health fields
@@ -96,4 +116,28 @@ The `diagnostic_msgs/DiagnosticArray` reports:
 is inferred from rate or age. Image middleware histories and processing work
 are both bounded to the latest sample, so overload drops old work instead of
 accumulating decision latency. No `sensor_msgs/PointCloud2`, slowdown, stop, or
-replanning output is created by this ticket.
+replanning output is created by the standalone `input_health` node.
+
+## Strong geometric hazard output
+
+Launch the geometry path and inspect its two separate outputs:
+
+```bash
+ros2 launch low_profile_hazard_perception geometric_hazard.launch.py
+ros2 topic echo /low_profile_hazard_perception/health
+ros2 topic echo /low_profile_hazard_perception/confirmed_hazards
+```
+
+Each valid depth frame is sparsely deprojected and fitted with a deterministic,
+direction-constrained robust observed-ground model. Health exposes its support,
+inlier ratio, median/P90 metric residual, spatial coverage, temporal
+consistency, measured camera height, and disagreement with nominal TF.
+
+Points at least 15 mm above that observed floor enter the strong-geometry path
+only when they have robust local metric support and physical span. Invalid
+reflective-floor depth is ignored as evidence. Every candidate is transformed
+with an interpolated odom pose at the depth sensor stamp; two observations must
+associate within 80 mm and 350 ms before any operational output is published.
+The resulting `sensor_msgs/PointCloud2` uses frame `odom` and the confirming
+observation's sensor stamp. The node publishes no slowdown, stop, or replanning
+command, and it exposes no candidate cloud on the operational topic.

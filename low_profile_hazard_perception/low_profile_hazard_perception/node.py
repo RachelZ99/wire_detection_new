@@ -271,15 +271,27 @@ class InputHealthNode(Node):
         )
         self._enqueue(
             stream,
-            partial(self._process_image, stream, observation),
+            partial(self._process_image, stream, observation, message),
             sensor_stamp_ns=observation.sensor_stamp_ns,
         )
 
     def _process_image(
-        self, stream: Stream, observation: ImageObservation
+        self,
+        stream: Stream,
+        observation: ImageObservation,
+        message: Image,
     ) -> int:
         self._monitor.observe_image(stream, observation)
+        self._after_image(stream, message, observation)
         return observation.receive_time_ns
+
+    def _after_image(
+        self,
+        stream: Stream,
+        message: Image,
+        observation: ImageObservation,
+    ) -> None:
+        """Extension seam for independently processed image evidence."""
 
     def _on_camera_info(self, stream: Stream, message: CameraInfo) -> None:
         observation = CameraInfoObservation(
@@ -303,9 +315,16 @@ class InputHealthNode(Node):
         self, stream: Stream, observation: CameraInfoObservation
     ) -> int:
         self._monitor.observe_camera_info(stream, observation)
+        self._after_camera_info(stream, observation)
         return observation.receive_time_ns
 
+    def _after_camera_info(
+        self, stream: Stream, observation: CameraInfoObservation
+    ) -> None:
+        """Extension seam for a validated per-stream camera model."""
+
     def _on_odom(self, message: Odometry) -> None:
+        self._before_odom(message)
         observation = OdomObservation(
             sensor_stamp_ns=_stamp_ns(message.header.stamp),
             receive_time_ns=time.monotonic_ns(),
@@ -317,6 +336,9 @@ class InputHealthNode(Node):
             partial(self._process_odom, observation),
             sensor_stamp_ns=observation.sensor_stamp_ns,
         )
+
+    def _before_odom(self, message: Odometry) -> None:
+        """Keep every odom pose available to extension interpolation."""
 
     def _process_odom(self, observation: OdomObservation) -> int:
         self._monitor.observe_odom(observation)
@@ -403,7 +425,17 @@ class InputHealthNode(Node):
             ),
         )
         self._monitor.observe_transforms(stream, observation)
+        self._after_tf(stream, is_static, message, observation)
         return receive_time_ns
+
+    def _after_tf(
+        self,
+        stream: Stream,
+        is_static: bool,
+        message: TFMessage,
+        observation: TransformBatchObservation,
+    ) -> None:
+        """Extension seam called after accepted transforms enter tf2."""
 
     def _snapshot(self) -> HealthSnapshot:
         return self._monitor.snapshot(
@@ -413,6 +445,8 @@ class InputHealthNode(Node):
 
     def _publish_health(self) -> None:
         snapshot = self._snapshot()
+        effective_state = self._effective_health_state(snapshot)
+        reasons = snapshot.reasons + self._additional_health_reasons()
         message = DiagnosticArray()
         message.header.stamp = self.get_clock().now().to_msg()
         status = DiagnosticStatus()
@@ -422,11 +456,11 @@ class InputHealthNode(Node):
             HealthState.HEALTHY: DiagnosticStatus.OK,
             HealthState.DEGRADED: DiagnosticStatus.WARN,
             HealthState.INVALID: DiagnosticStatus.ERROR,
-        }[snapshot.state]
-        status.message = snapshot.state.value
+        }[effective_state]
+        status.message = effective_state.value
         values: dict[str, object] = {
-            "state": snapshot.state.value,
-            "reasons": ",".join(snapshot.reasons),
+            "state": effective_state.value,
+            "reasons": ",".join(reasons),
             "missing_streams": ",".join(
                 stream.value for stream in snapshot.missing_streams
             ),
@@ -450,8 +484,11 @@ class InputHealthNode(Node):
             "receive_age_clock": "steady_monotonic",
             "queue_drop_source": "latest_input_queue",
             "transport_drop_source": "rmw_message_lost",
-            "operational_hazard_output_enabled": False,
+            "operational_hazard_output_enabled": (
+                self._operational_hazard_output_enabled()
+            ),
         }
+        values.update(self._additional_health_values())
         for stream, health in snapshot.streams.items():
             prefix = stream.value
             queue = self._input_queues[stream]
@@ -504,6 +541,18 @@ class InputHealthNode(Node):
             f"depth={depth.profile}/{depth.encoding}"
         )
         self._profile_logged = True
+
+    def _operational_hazard_output_enabled(self) -> bool:
+        return False
+
+    def _additional_health_values(self) -> dict[str, object]:
+        return {}
+
+    def _effective_health_state(self, snapshot: HealthSnapshot) -> HealthState:
+        return snapshot.state
+
+    def _additional_health_reasons(self) -> tuple[str, ...]:
+        return ()
 
 
 def main(args: list[str] | None = None) -> None:
