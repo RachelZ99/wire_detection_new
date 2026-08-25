@@ -1,0 +1,17 @@
+input_health:
+  ros__parameters:
+    expected_width: 640
+    expected_height: 360
+    sensor_stale_after_ms: 500.0
+    receive_stale_after_ms: 500.0
+    health_publish_period_ms: 200.0
+    camera_frame: camera_1_color_optical_frame
+    base_frame: base_footprint
+    color_image_topic: /camera_1/color/image_raw
+    color_camera_info_topic: /camera_1/color/camera_info
+    depth_image_topic: /camera_1/depth/image_raw
+    depth_camera_info_topic: /camera_1/depth/camera_info
+    odom_topic: /odom
+    tf_topic: /tf
+    tf_static_topic: /tf_static
+    health_topic: /low_profile_hazard_perception/health
