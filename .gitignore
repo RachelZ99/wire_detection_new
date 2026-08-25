@@ -1,0 +1,16 @@
+.DS_Store
+.venv/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+
+# ROS 2 / colcon outputs
+build/
+install/
+log/
+
+# Local recordings and generated model artifacts
+*.db3
+*.mcap
+*.onnx
+*.rknn
