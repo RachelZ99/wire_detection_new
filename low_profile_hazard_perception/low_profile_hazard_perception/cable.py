@@ -319,7 +319,7 @@ class TrainingFreeCableDetector:
             - (p90_width - p10_width)
             / max(float(self.config.maximum_half_width_px * 2), 1.0),
         )
-        continuity = min(1.0, len(component) / max(pixel_span, 1.0))
+        continuity = _curve_continuity(component)
         if (
             width_consistency < self.config.minimum_width_consistency
             or continuity < self.config.minimum_curve_continuity
@@ -416,6 +416,33 @@ def _components(pixels: set[Pixel]) -> tuple[set[Pixel], ...]:
                         frontier.append(neighbor)
         components.append(component)
     return tuple(components)
+
+
+def _curve_continuity(component: set[Pixel]) -> float:
+    """Score whether a component follows one thin trajectory, not branches.
+
+    Slice along the component's longer image axis and count disjoint runs in
+    each slice.  A normal straight or gently curving cable contributes one run
+    per slice.  Forks, paired seams, and broad reflections contribute multiple
+    runs and therefore reduce the score.
+    """
+    if not component:
+        return 0.0
+    columns = [column for column, _ in component]
+    rows = [row for _, row in component]
+    use_rows = max(rows) - min(rows) >= max(columns) - min(columns)
+    slices: dict[int, set[int]] = {}
+    for column, row in component:
+        major, minor = (row, column) if use_rows else (column, row)
+        slices.setdefault(major, set()).add(minor)
+    run_count = 0
+    for values in slices.values():
+        ordered = sorted(values)
+        run_count += 1 + sum(
+            right - left > 1
+            for left, right in zip(ordered, ordered[1:], strict=False)
+        )
+    return len(slices) / max(run_count, 1)
 
 
 def _percentile(sorted_values: Sequence[float], fraction: float) -> float:

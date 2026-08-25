@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 
-NegativeRegion = tuple[str, float, float, float, float]
+@dataclass(frozen=True)
+class NegativeRegion:
+    """Named odom bounds in which cable confirmation is forbidden."""
+
+    label: str
+    minimum_x: float
+    maximum_x: float
+    minimum_y: float
+    maximum_y: float
 
 
 def audit_rgb_cable_replay(
@@ -73,21 +82,24 @@ def audit_rgb_cable_replay(
         raise ValueError(
             "replay produced no physically supported, aligned odom cable cloud"
         )
-    for label, minimum_x, maximum_x, minimum_y, maximum_y in negative_regions:
+    for region in negative_regions:
         persistent_count = sum(
             cloud.get("rgb_cable_centroid_x_m") is not None
             and cloud.get("rgb_cable_centroid_y_m") is not None
-            and minimum_x
+            and region.minimum_x
             <= float(cloud["rgb_cable_centroid_x_m"])
-            <= maximum_x
-            and minimum_y
+            <= region.maximum_x
+            and region.minimum_y
             <= float(cloud["rgb_cable_centroid_y_m"])
-            <= maximum_y
+            <= region.maximum_y
             for cloud in hazard_clouds
         )
-        if persistent_count >= 2:
+        # One operational cloud already proves two observations confirmed the
+        # false event; unchanged transient-local state is not republished.
+        if persistent_count >= 1:
             raise ValueError(
-                f"persistent cable evidence appeared in negative region {label}"
+                "confirmed cable evidence appeared in negative region "
+                f"{region.label}"
             )
     maximum_spread = max(
         (

@@ -1,6 +1,7 @@
 import unittest
 
 from low_profile_hazard_perception.cable_replay_audit import (
+    NegativeRegion,
     audit_rgb_cable_replay,
 )
 
@@ -20,7 +21,7 @@ class RgbCableReplayAuditTests(unittest.TestCase):
             maximum_alignment_spread_m=0.025,
             minimum_physical_span_m=0.06,
             negative_regions=(
-                ("empty_reflective_floor", 0.4, 1.2, -0.3, 0.3),
+                NegativeRegion("empty_reflective_floor", 0.4, 1.2, -0.3, 0.3),
             ),
             require_positive=False,
         )
@@ -80,7 +81,7 @@ class RgbCableReplayAuditTests(unittest.TestCase):
                 minimum_physical_span_m=0.06,
             )
 
-    def test_rejects_persistent_cable_evidence_in_named_negative_region(
+    def test_rejects_one_confirmed_cable_cloud_in_named_negative_region(
         self,
     ) -> None:
         values = {
@@ -106,11 +107,11 @@ class RgbCableReplayAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "long_shadow"):
             audit_rgb_cable_replay(
                 stable_values=values,
-                clouds=[cloud, {**cloud, "stamp_ns": 1_300_000_000, "source_stamp_min_ns": 1_300_000_000}],
+                clouds=[cloud],
                 maximum_alignment_spread_m=0.025,
                 minimum_physical_span_m=0.06,
                 negative_regions=(
-                    ("long_shadow", 0.8, 1.0, 0.0, 0.2),
+                    NegativeRegion("long_shadow", 0.8, 1.0, 0.0, 0.2),
                 ),
             )
 

@@ -68,6 +68,39 @@ def _rgb_line(
 
 
 class TrainingFreeRgbCableTests(unittest.TestCase):
+    def test_branched_ridge_is_rejected_by_curve_continuity(self) -> None:
+        depth, intrinsics, ground = _floor_scene()
+        floor = ObservedFloorRegion.from_depth(
+            depth,
+            intrinsics,
+            ground,
+            depth_unit_m=0.001,
+        )
+        data = bytearray((82, 86, 88) * (intrinsics.width * intrinsics.height))
+
+        def paint(center_column: int, row: int) -> None:
+            for column in range(center_column - 1, center_column + 2):
+                offset = (row * intrinsics.width + column) * 3
+                data[offset : offset + 3] = bytes((235, 235, 235))
+
+        for row in range(55, 69):
+            paint(60, row)
+        for step, row in enumerate(range(55, 47, -1)):
+            paint(60 - step, row)
+            paint(60 + step, row)
+
+        candidates = TrainingFreeCableDetector(
+            TrainingFreeCableConfig(
+                minimum_component_pixels=12,
+                minimum_length_px=12.0,
+                minimum_physical_span_m=0.04,
+                minimum_width_consistency=0.0,
+                minimum_curve_continuity=0.80,
+            )
+        ).detect(bytes(data), intrinsics, ground, floor)
+
+        self.assertEqual(candidates, ())
+
     def test_inconsistent_width_is_rejected_instead_of_only_downscored(
         self,
     ) -> None:

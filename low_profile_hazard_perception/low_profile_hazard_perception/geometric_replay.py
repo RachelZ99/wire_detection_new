@@ -24,7 +24,7 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import PointCloud2
 
-from .cable_replay_audit import audit_rgb_cable_replay
+from .cable_replay_audit import NegativeRegion, audit_rgb_cable_replay
 from .geometric_replay_audit import (
     GeometricReplayCloud,
     observation_blind_zone_retention_audit,
@@ -411,12 +411,12 @@ def _parse_args(
         parser.error("--minimum-cable-physical-span must be positive")
     try:
         parsed.negative_cable_region = tuple(
-            (
-                values[0],
-                float(values[1]),
-                float(values[2]),
-                float(values[3]),
-                float(values[4]),
+            NegativeRegion(
+                label=values[0],
+                minimum_x=float(values[1]),
+                maximum_x=float(values[2]),
+                minimum_y=float(values[3]),
+                maximum_y=float(values[4]),
             )
             for values in parsed.negative_cable_region or ()
         )
