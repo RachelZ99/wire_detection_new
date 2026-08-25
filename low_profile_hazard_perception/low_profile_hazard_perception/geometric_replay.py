@@ -1,4 +1,4 @@
-"""Deterministic black-box replay for the confirmed geometric hazard seam."""
+"""Deterministic black-box replay for confirmed low-profile hazards."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import PointCloud2
 
+from .cable_replay_audit import audit_rgb_cable_replay
 from .geometric_replay_audit import (
     GeometricReplayCloud,
     observation_blind_zone_retention_audit,
@@ -97,6 +98,14 @@ class _Collector(Node):
             ),
             None,
         )
+        evidence_field = next(
+            (
+                field
+                for field in message.fields
+                if field.name == "evidence_mask"
+            ),
+            None,
+        )
         confirmation_spread_m = None
         if spread_field is not None and message.data:
             confirmation_spread_m = round(
@@ -115,6 +124,27 @@ class _Collector(Node):
         points = [
             struct.unpack_from("<fff", bytes(message.data), offset)
             for offset in range(0, len(message.data), int(message.point_step))
+        ]
+        evidence_masks = (
+            [
+                struct.unpack_from(
+                    "<B",
+                    bytes(message.data),
+                    offset + evidence_field.offset,
+                )[0]
+                for offset in range(
+                    0, len(message.data), int(message.point_step)
+                )
+            ]
+            if evidence_field is not None
+            else [0] * len(points)
+        )
+        rgb_cable_points = [
+            point
+            for point, evidence_mask in zip(
+                points, evidence_masks, strict=True
+            )
+            if evidence_mask & 2
         ]
         source_stamps_ns: list[int] = []
         if (
@@ -147,6 +177,7 @@ class _Collector(Node):
                 (max(x_values) - min(x_values)) ** 2
                 + (max(y_values) - min(y_values)) ** 2
             ) ** 0.5
+        rgb_cable_span_m = _horizontal_span(rgb_cable_points)
         self.clouds.append(
             {
                 "stamp_ns": _stamp_ns(message.header.stamp),
@@ -168,6 +199,26 @@ class _Collector(Node):
                     else None
                 ),
                 "confirmation_spread_m": confirmation_spread_m,
+                "rgb_cable_point_count": len(rgb_cable_points),
+                "rgb_cable_span_m": round(rgb_cable_span_m, 6),
+                "rgb_cable_centroid_x_m": (
+                    round(
+                        sum(point[0] for point in rgb_cable_points)
+                        / len(rgb_cable_points),
+                        6,
+                    )
+                    if rgb_cable_points
+                    else None
+                ),
+                "rgb_cable_centroid_y_m": (
+                    round(
+                        sum(point[1] for point in rgb_cable_points)
+                        / len(rgb_cable_points),
+                        6,
+                    )
+                    if rgb_cable_points
+                    else None
+                ),
                 "source_stamp_min_ns": (
                     min(source_stamps_ns) if source_stamps_ns else None
                 ),
@@ -270,11 +321,20 @@ def _run_once(
         collector.destroy_node()
 
 
-def _parse_args(args: list[str] | None) -> argparse.Namespace:
+def _parse_args(
+    args: list[str] | None,
+    *,
+    evidence_mode: str,
+) -> argparse.Namespace:
+    target = (
+        "reference strong protrusion"
+        if evidence_mode == "geometry"
+        else "training-free RGB cable"
+    )
     parser = argparse.ArgumentParser(
         description=(
             "Replay independent RGB-D/odom inputs and require a deterministic "
-            "confirmed odom point cloud from the reference strong protrusion."
+            f"confirmed odom point cloud from the {target}."
         )
     )
     parser.add_argument("bag", type=Path)
@@ -294,6 +354,16 @@ def _parse_args(args: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--expected-power-strip-radius", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--expected-cable-center",
+        type=float,
+        nargs=2,
+        metavar=("ODOM_X", "ODOM_Y"),
+    )
+    parser.add_argument("--expected-cable-radius", type=float, default=0.15)
+    parser.add_argument(
+        "--minimum-cable-physical-span", type=float, default=0.06
     )
     parser.add_argument(
         "--reflective-floor-region",
@@ -321,6 +391,8 @@ def _parse_args(args: list[str] | None) -> argparse.Namespace:
         parser.error("--rate must be positive")
     if parsed.maximum_alignment_spread <= 0.0:
         parser.error("--maximum-alignment-spread must be positive")
+    if parsed.minimum_cable_physical_span <= 0.0:
+        parser.error("--minimum-cable-physical-span must be positive")
     if not parsed.bag.exists():
         parser.error(f"bag does not exist: {parsed.bag}")
     return parsed
@@ -333,6 +405,17 @@ def _percentile(values: list[float], fraction: float) -> float | None:
     return round(values[index], 6)
 
 
+def _horizontal_span(points: list[tuple[float, float, float]]) -> float:
+    if not points:
+        return 0.0
+    return (
+        (max(point[0] for point in points) - min(point[0] for point in points))
+        ** 2
+        + (max(point[1] for point in points) - min(point[1] for point in points))
+        ** 2
+    ) ** 0.5
+
+
 def _canonical(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "health": result["health"]["canonical"],
@@ -341,7 +424,15 @@ def _canonical(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(args: list[str] | None = None) -> None:
-    options = _parse_args(args)
+    _main(args, evidence_mode="geometry")
+
+
+def main_rgb_cable(args: list[str] | None = None) -> None:
+    _main(args, evidence_mode="rgb_cable")
+
+
+def _main(args: list[str] | None, *, evidence_mode: str) -> None:
+    options = _parse_args(args, evidence_mode=evidence_mode)
     rclpy.init(args=[])
     try:
         results = [
@@ -360,7 +451,8 @@ def main(args: list[str] | None = None) -> None:
     for run_number, result in enumerate(results[1:], start=2):
         if _canonical(result) != baseline:
             raise SystemExit(
-                f"non-deterministic geometric replay on run {run_number}:\n"
+                f"non-deterministic {evidence_mode} replay on run "
+                f"{run_number}:\n"
                 + json.dumps(
                     {"first": baseline, "different": _canonical(result)},
                     indent=2,
@@ -395,12 +487,14 @@ def main(args: list[str] | None = None) -> None:
         and cloud["p90_height_m"] <= 0.151
         and cloud["horizontal_span_m"] >= 0.04
     ]
-    if not strong_clouds:
+    if evidence_mode == "geometry" and not strong_clouds:
         raise SystemExit(
             "reference replay produced no robustly supported strong "
             "protrusion cloud"
         )
-    if any(cloud["horizontal_span_m"] > 0.75 for cloud in hazard_clouds):
+    if evidence_mode == "geometry" and any(
+        cloud["horizontal_span_m"] > 0.75 for cloud in hazard_clouds
+    ):
         raise SystemExit(
             "an operational cloud has a trail-like spatial extent"
         )
@@ -413,7 +507,10 @@ def main(args: list[str] | None = None) -> None:
             "at least one confirmed cloud exceeded the replay alignment "
             "spread"
         )
-    if options.expected_power_strip_center is not None:
+    if (
+        evidence_mode == "geometry"
+        and options.expected_power_strip_center is not None
+    ):
         expected_x, expected_y = options.expected_power_strip_center
         matching_power_strip = [
             cloud
@@ -443,6 +540,27 @@ def main(args: list[str] | None = None) -> None:
                 "reflective-floor region"
             )
     values = baseline["health"]["stable_values"]
+    cable_audit = None
+    if evidence_mode == "rgb_cable":
+        try:
+            cable_audit = audit_rgb_cable_replay(
+                stable_values=values,
+                clouds=clouds,
+                maximum_alignment_spread_m=(
+                    options.maximum_alignment_spread
+                ),
+                minimum_physical_span_m=(
+                    options.minimum_cable_physical_span
+                ),
+                expected_center_odom=(
+                    tuple(options.expected_cable_center)
+                    if options.expected_cable_center is not None
+                    else None
+                ),
+                expected_center_radius_m=options.expected_cable_radius,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise SystemExit(f"RGB cable replay audit failed: {error}") from error
     measured_height = float(values["ground.camera_height_m"])
     if not (
         options.minimum_measured_height
@@ -489,6 +607,7 @@ def main(args: list[str] | None = None) -> None:
             "confirmed_cloud_count": len(hazard_clouds),
             "clearing_cloud_count": len(clouds) - len(hazard_clouds),
             "observation_blind_zone_retention": blind_zone_audit,
+            "rgb_cable_audit": cable_audit,
             "canonical": baseline,
             "runs": results,
         },

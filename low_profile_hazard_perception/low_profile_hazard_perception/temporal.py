@@ -252,6 +252,7 @@ class OdomPoseCache:
 
 class EvidenceSource(str, Enum):
     STRONG_GEOMETRY = "STRONG_GEOMETRY"
+    RGB_CABLE = "RGB_CABLE"
 
 
 @dataclass(frozen=True)

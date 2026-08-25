@@ -10,6 +10,7 @@ from low_profile_hazard_perception.health import (
     Transform,
     TransformBatchObservation,
     geometric_projection_support_reason,
+    rgb_projection_support_reason,
 )
 
 
@@ -168,6 +169,7 @@ class InputContractTests(unittest.TestCase):
             geometric_projection_support_reason(missing_snapshot),
             "camera_info:missing",
         )
+
         missing.observe_camera_info(
             Stream.DEPTH_CAMERA_INFO,
             CameraInfoObservation(
@@ -328,6 +330,42 @@ class InputContractTests(unittest.TestCase):
                 )
             ),
             "depth:sensor_stale",
+        )
+
+    def test_rgb_projection_requires_its_own_camera_contract(self) -> None:
+        monitor = HealthMonitor(expected_width=640, expected_height=360)
+
+        missing = monitor.snapshot(
+            sensor_now_ns=1_000_000_000,
+            receive_now_ns=10_000_000,
+        )
+
+        self.assertEqual(
+            rgb_projection_support_reason(missing),
+            "color_camera_info:missing",
+        )
+        monitor.observe_camera_info(
+            Stream.COLOR_CAMERA_INFO,
+            CameraInfoObservation(
+                sensor_stamp_ns=1_000_000_000,
+                receive_time_ns=10_000_000,
+                frame_id="camera_1_color_optical_frame",
+                width=640,
+                height=360,
+                fx=455.0,
+                fy=455.0,
+                cx=320.0,
+                cy=180.0,
+            ),
+        )
+        self.assertEqual(
+            rgb_projection_support_reason(
+                monitor.snapshot(
+                    sensor_now_ns=1_000_000_000,
+                    receive_now_ns=10_000_000,
+                )
+            ),
+            "color:missing",
         )
 
     def test_invalid_dimensions_stride_encoding_and_camera_info_are_invalid(

@@ -202,6 +202,26 @@ def geometric_projection_support_reason(snapshot: HealthSnapshot) -> str:
     return ""
 
 
+def rgb_projection_support_reason(snapshot: HealthSnapshot) -> str:
+    """Explain why independently stamped RGB cannot reach the floor/odom."""
+    required = (
+        (Stream.COLOR_CAMERA_INFO, "color_camera_info"),
+        (Stream.COLOR_IMAGE, "color"),
+    )
+    for stream, label in required:
+        if stream in snapshot.missing_streams:
+            return f"{label}:missing"
+        if stream in snapshot.invalid_streams:
+            return f"{label}:invalid"
+        if stream in snapshot.stale_sensor_streams:
+            return f"{label}:sensor_stale"
+        if stream in snapshot.stale_receive_streams:
+            return f"{label}:receive_stale"
+    if snapshot.camera_info_consistency["color"] is not True:
+        return "color_camera_info:inconsistent"
+    return geometric_projection_support_reason(snapshot)
+
+
 @dataclass
 class _StreamRecord:
     delivered_count: int = 0

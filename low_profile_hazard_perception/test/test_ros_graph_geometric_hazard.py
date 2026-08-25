@@ -87,7 +87,20 @@ def _color(stamp: object) -> Image:
     return message
 
 
-def _depth(stamp: object, *, object_center_column: int) -> Image:
+def _cable_color(stamp: object, *, center_column: int) -> Image:
+    message = _color(stamp)
+    data = bytearray((82, 86, 88) * (message.width * message.height))
+    for row in range(240, 321):
+        for column in range(center_column - 1, center_column + 2):
+            offset = (row * message.width + column) * 3
+            data[offset : offset + 3] = bytes((235, 235, 235))
+    message.data = bytes(data)
+    return message
+
+
+def _depth(
+    stamp: object, *, object_center_column: int | None
+) -> Image:
     width = 640
     height = 360
     fx = fy = 455.0
@@ -106,7 +119,8 @@ def _depth(stamp: object, *, object_center_column: int) -> Image:
                 values.append(0)
                 continue
             raised = (
-                255 <= row < 282
+                object_center_column is not None
+                and 255 <= row < 282
                 and object_center_column - 30
                 <= column
                 < object_center_column + 30
@@ -130,6 +144,144 @@ def _invalid_depth(stamp: object) -> Image:
     message = _depth(stamp, object_center_column=360)
     message.data = bytes(message.step * message.height)
     return message
+
+
+def test_two_rgb_cable_observations_publish_the_same_odom_cloud() -> None:
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "sensor_stale_after_ms:=5000.0",
+            "-p",
+            "receive_stale_after_ms:=5000.0",
+        ]
+    )
+    perception = GeometricHazardNode()
+    driver = Node("rgb_cable_hazard_test_driver")
+    executor = SingleThreadedExecutor()
+    executor.add_node(perception)
+    executor.add_node(driver)
+    health: list[DiagnosticArray] = []
+    clouds: list[PointCloud2] = []
+    driver.create_subscription(
+        DiagnosticArray,
+        "/low_profile_hazard_perception/health",
+        health.append,
+        _qos(transient=True, depth=1),
+    )
+    driver.create_subscription(
+        PointCloud2,
+        "/low_profile_hazard_perception/confirmed_hazards",
+        clouds.append,
+        QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        ),
+    )
+    publishers = {
+        "color": driver.create_publisher(
+            Image, "/camera_1/color/image_raw", _qos(depth=1)
+        ),
+        "color_info": driver.create_publisher(
+            CameraInfo, "/camera_1/color/camera_info", _qos(depth=1)
+        ),
+        "depth": driver.create_publisher(
+            Image, "/camera_1/depth/image_raw", _qos(depth=1)
+        ),
+        "depth_info": driver.create_publisher(
+            CameraInfo, "/camera_1/depth/camera_info", _qos(depth=1)
+        ),
+        "odom": driver.create_publisher(Odometry, "/odom", _qos()),
+        "tf": driver.create_publisher(TFMessage, "/tf", _qos()),
+        "tf_static": driver.create_publisher(
+            TFMessage, "/tf_static", _qos(transient=True, depth=100)
+        ),
+    }
+    try:
+        _spin_until(executor, lambda: bool(health))
+        base_ns = driver.get_clock().now().nanoseconds + 100_000_000
+        depth_stamp = Time(nanoseconds=base_ns + 200_000_000).to_msg()
+        first_rgb_stamp = Time(nanoseconds=base_ns + 300_000_000).to_msg()
+        second_rgb_stamp = Time(nanoseconds=base_ns + 500_000_000).to_msg()
+        publishers["color_info"].publish(_camera_info(first_rgb_stamp))
+        publishers["depth_info"].publish(_camera_info(depth_stamp))
+        publishers["tf_static"].publish(
+            TFMessage(
+                transforms=[
+                    _transform(
+                        depth_stamp,
+                        "base_footprint",
+                        "camera_1_color_optical_frame",
+                        x=0.33,
+                        z=0.15,
+                    )
+                ]
+            )
+        )
+        publishers["tf"].publish(
+            TFMessage(
+                transforms=[
+                    _transform(depth_stamp, "odom", "base_footprint")
+                ]
+            )
+        )
+        for stamp_ns in range(
+            base_ns + 150_000_000,
+            base_ns + 651_000_000,
+            50_000_000,
+        ):
+            publishers["odom"].publish(
+                _odom(Time(nanoseconds=stamp_ns).to_msg(), 0.0)
+            )
+            executor.spin_once(timeout_sec=0.01)
+        publishers["depth"].publish(
+            _depth(depth_stamp, object_center_column=None)
+        )
+        publishers["color"].publish(
+            _cable_color(first_rgb_stamp, center_column=320)
+        )
+        _spin_until(
+            executor,
+            lambda: _values(health).get("cable.processed_rgb_count") == "1"
+            and _values(health).get("cable.latest_candidate_count") == "1",
+            timeout=15.0,
+        )
+        assert clouds == []
+
+        publishers["color"].publish(
+            _cable_color(second_rgb_stamp, center_column=320)
+        )
+        _spin_until(executor, lambda: bool(clouds), timeout=15.0)
+
+        cloud = clouds[-1]
+        assert cloud.header.frame_id == "odom"
+        assert cloud.header.stamp == second_rgb_stamp
+        evidence_field = next(
+            field for field in cloud.fields if field.name == "evidence_mask"
+        )
+        evidence_masks = [
+            struct.unpack_from(
+                "<B", bytes(cloud.data), offset + evidence_field.offset
+            )[0]
+            for offset in range(0, len(cloud.data), cloud.point_step)
+        ]
+        assert evidence_masks
+        assert all(mask & 2 for mask in evidence_masks)
+        values = _values(health)
+        assert values["cable.provider"] == "training_free_thin_line"
+        assert values["cable.confirmed_observation_count"] == "1"
+        assert values["cable.confirmation_observations"] == "2"
+        assert values["cable.rgb_depth_synchronizer"] == "disabled"
+        assert values["cable.diagnostic_pink_operational"] == "false"
+    finally:
+        executor.remove_node(driver)
+        executor.remove_node(perception)
+        driver.destroy_node()
+        perception.destroy_node()
+        executor.shutdown()
+        rclpy.shutdown()
 
 
 def _odom(stamp: object, x: float) -> Odometry:
@@ -349,6 +501,16 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (
         field_names = {field.name for field in cloud.fields}
         assert "observation_stamp_sec" in field_names
         assert "observation_stamp_nanosec" in field_names
+        assert "evidence_mask" in field_names
+        evidence_field = next(
+            field for field in cloud.fields if field.name == "evidence_mask"
+        )
+        assert (
+            struct.unpack_from(
+                "<B", bytes(cloud.data), evidence_field.offset
+            )[0]
+            == 1
+        )
         stamp_sec_field = next(
             field
             for field in cloud.fields

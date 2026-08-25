@@ -38,6 +38,25 @@ geometric_hazard:
     strong_minimum_spatial_span_m: 0.04
     geometry_cluster_cell_m: 0.04
 
+    # Formal RGB cable path: local paired-edge structure at native 640x360.
+    # No parameter encodes a cable color and there is no large area gate.
+    cable_local_contrast_threshold: 24.0
+    cable_maximum_half_width_px: 3
+    cable_minimum_component_pixels: 16
+    cable_minimum_length_px: 16.0
+    cable_minimum_apparent_width_px: 1.5
+    cable_maximum_apparent_width_px: 6.0
+    cable_minimum_physical_span_m: 0.06
+    cable_maximum_ground_age_ms: 500.0
+
+    # Optional legacy-style demo comparison. These values only produce a
+    # diagnostic pixel count and can never create a hazard observation.
+    diagnostic_pink_comparison_enabled: false
+    diagnostic_pink_minimum_red: 90
+    diagnostic_pink_minimum_red_over_green: 10
+    diagnostic_pink_minimum_blue_over_green: 5
+    diagnostic_pink_maximum_red_blue_difference: 60
+
     # Confirmation happens only after observation-time alignment in odom.
     association_radius_m: 0.08
     confirmation_window_ms: 350.0

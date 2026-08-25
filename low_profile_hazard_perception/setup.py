@@ -23,7 +23,7 @@ setup(
     maintainer="Low-profile perception maintainers",
     maintainer_email="maintainers@example.invalid",
     description=(
-        "Asynchronous RGB-D health and odom-aligned geometric hazards."
+        "Asynchronous RGB-D health and odom-aligned low-profile hazards."
     ),
     license="Apache-2.0",
     entry_points={
@@ -34,6 +34,8 @@ setup(
             "replay_rgbd_health = low_profile_hazard_perception.replay:main",
             "replay_geometric_hazard = "
             "low_profile_hazard_perception.geometric_replay:main",
+            "replay_rgb_cable = "
+            "low_profile_hazard_perception.geometric_replay:main_rgb_cable",
         ],
     },
 )

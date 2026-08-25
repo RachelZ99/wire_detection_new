@@ -1,10 +1,10 @@
 # Low-Profile Hazard Perception
 
 This repository is the new asynchronous RGB-D perception project described in
-the PRD and ADRs. The current depth-only path observes the floor, aligns each
-depth observation at its own timestamp in `odom`, publishes only twice-confirmed
-low-profile hazards, and conservatively retains them through the measured
-observation blind zone and sensing degradation.
+the PRD and ADRs. Independent depth and training-free RGB paths observe the
+floor, align each observation at its own timestamp in `odom`, publish only
+twice-confirmed low-profile hazards, and conservatively retain them through the
+measured observation blind zone and sensing degradation.
 
 ## Supported environment
 
@@ -43,6 +43,15 @@ The geometry and temporal contracts can be checked the same way with
 `test_ground_geometry.py`, `test_geometric_pipeline.py`, and
 `test_temporal_alignment.py`.
 
+The training-free RGB cable contracts and synthetic positive/negative replay
+set can be checked without ROS with:
+
+```bash
+PYTHONPATH=low_profile_hazard_perception \
+  python3 -m unittest discover \
+  -s low_profile_hazard_perception/test -p 'test_rgb_cable_*.py'
+```
+
 ## Deterministic reference replay
 
 The reference bag is an external test artifact named `wire_rgbd_strip_01`; it
@@ -65,7 +74,29 @@ ros2 run low_profile_hazard_perception replay_geometric_hazard \
   --output reference-geometric-hazard.json
 ```
 
-This replay additionally requires at least one non-empty, meaningfully stamped
+Run the ticket-4 acceptance on the recorded pale-cable bag and an independent
+white-cable scene. Scene-specific odom annotations must accompany the external
+bags; the repository does not invent their coordinates:
+
+```bash
+ros2 run low_profile_hazard_perception replay_rgb_cable \
+  /path/to/wire_rgbd_strip_01 --repeat 2 \
+  --expected-cable-center ODOM_X ODOM_Y \
+  --output reference-pale-cable.json
+
+ros2 run low_profile_hazard_perception replay_rgb_cable \
+  /path/to/white_cable_scene --repeat 2 \
+  --expected-cable-center ODOM_X ODOM_Y \
+  --output reference-white-cable.json
+```
+
+The cable replay requires the formal `training_free_thin_line` provider, at
+least two processed RGB observations, a cable confirmation, and cable-evidence
+points with bounded confirmation spread and physical span in the operational
+`odom` cloud. It explicitly rejects the diagnostic pink comparison as an
+operational provider.
+
+The geometric replay additionally requires at least one non-empty, meaningfully stamped
 `odom` point cloud, deterministic point bytes and timestamps across runs, and
 an observed camera-to-floor distance in the measured 0.20–0.25 m range. The
 nominal 0.15 m TF value is reported as a consistency comparison, not used as
@@ -166,13 +197,48 @@ The resulting `sensor_msgs/PointCloud2` uses frame `odom` and the confirming
 observation's sensor stamp. The node publishes no slowdown, stop, or replanning
 command, and it exposes no candidate cloud on the operational topic. Alongside
 standard `x/y/z`, each operational point carries the confirmation's
-`confirmation_spread` so replay can reject every misaligned event rather than
-only inspecting the last health snapshot.
+`confirmation_spread` and an `evidence_mask` (`1` for strong geometry, `2` for
+RGB cable evidence) so replay can reject every misaligned event and identify
+the evidence carried by each retained shape.
 
 The internal field remains named `sensor_stamp_ns` intentionally: the current
 DCW2 profile has `use_hardware_time: false`, and the repository has not yet
 proved clock offset/drift compensation needed to call this a true capture time.
 Host receipt/callback time is never substituted for it.
+
+## Training-free RGB cable output
+
+The RGB path runs on the native delivered image without erosion or resizing.
+It scores local paired-edge contrast at multiple 2--6 px scales, groups
+continuous thin structures, and gates them by pixel length, apparent-width
+range and consistency, curve continuity, and projected physical span. It does
+not encode pink, white, or any other cable color, and it has no legacy
+5000-pixel component-area gate.
+
+Only cells supported by the latest accepted observed-ground depth can generate
+RGB candidates. Nearby floor support conservatively bridges the narrow invalid
+depth stripe caused by a cable, while observed raised cells exclude hanging
+wires, table/tripod legs, and background structure. Every accepted RGB pixel is
+positioned by ray intersection with the observed ground plane, including cable
+pixels whose depth is invalid. A ground model more than 500 ms from the RGB
+sensor stamp blocks new cable evidence as `ground:stale`.
+
+Each RGB observation uses its own sensor stamp for odom interpolation and enters
+the same two-observation tracker, retained set, and transient-local operational
+point cloud as strong geometry. Health exposes provider, candidate/confirmation
+counts, processing/drop counts, ground-ray projection, and
+`cable.rgb_depth_synchronizer=disabled`.
+
+The optional pink demo profile is disabled by default. When explicitly enabled,
+it publishes only `cable.diagnostic_pink_pixel_count`; health also states
+`cable.diagnostic_pink_operational=false`, and the count never reaches the
+tracker or operational cloud.
+
+The ROS-independent negative replay set represents empty reflective floor,
+long shadows, one-pixel floor seams, hanging/background wires, table/tripod
+legs, and cable reflections. The positive set covers pale and white cables at
+2--5 px, including missing depth along the cable pixels. These are home
+feasibility fixtures, not factory validation.
 
 ## Conservative degradation and retention
 

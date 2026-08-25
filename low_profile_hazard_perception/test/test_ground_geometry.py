@@ -7,6 +7,7 @@ from low_profile_hazard_perception.geometry import (
     GroundEstimatorConfig,
     StrongGeometryConfig,
     StrongGeometryDetector,
+    GroundPlane,
 )
 
 
@@ -35,6 +36,28 @@ def _plane_depth_image(
 
 
 class ObservedGroundModelTests(unittest.TestCase):
+    def test_floor_ray_intersection_projects_a_pixel_without_depth(self) -> None:
+        intrinsics = CameraIntrinsics(
+            width=160,
+            height=90,
+            fx=114.0,
+            fy=114.0,
+            cx=80.0,
+            cy=45.0,
+        )
+        pitch = math.radians(2.7)
+        ground = GroundPlane(
+            normal=(0.0, -math.cos(pitch), -math.sin(pitch)),
+            offset_m=0.225,
+        )
+
+        point = ground.intersect_pixel_ray(intrinsics, column=80, row=72)
+
+        self.assertIsNotNone(point)
+        assert point is not None
+        self.assertAlmostEqual(ground.signed_height(point), 0.0, places=9)
+        self.assertGreater(point[2], 0.2)
+
     def test_ambiguous_or_unobserved_ground_is_rejected_deterministically(
         self,
     ) -> None:

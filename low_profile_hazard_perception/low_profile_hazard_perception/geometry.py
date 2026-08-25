@@ -51,6 +51,30 @@ class GroundPlane:
             + self.offset_m
         )
 
+    def intersect_pixel_ray(
+        self,
+        intrinsics: CameraIntrinsics,
+        *,
+        column: int,
+        row: int,
+    ) -> Point3 | None:
+        """Intersect an optical pixel ray with this observed floor plane."""
+        ray = (
+            (column - intrinsics.cx) / intrinsics.fx,
+            (row - intrinsics.cy) / intrinsics.fy,
+            1.0,
+        )
+        denominator = sum(
+            normal * direction
+            for normal, direction in zip(self.normal, ray, strict=True)
+        )
+        if abs(denominator) <= 1e-12:
+            return None
+        scale = -self.offset_m / denominator
+        if not isfinite(scale) or scale <= 0.0:
+            return None
+        return tuple(scale * direction for direction in ray)
+
 
 @dataclass(frozen=True)
 class GroundQualityMetrics:

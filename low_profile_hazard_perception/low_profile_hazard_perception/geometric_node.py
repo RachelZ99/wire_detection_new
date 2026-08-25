@@ -1,4 +1,4 @@
-"""ROS adapter for strong depth geometry at independent capture times."""
+"""ROS adapter for independently stamped geometry and RGB cable evidence."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from tf2_msgs.msg import TFMessage
 
+from .cable import DiagnosticPinkConfig, TrainingFreeCableConfig
 from .geometric_pipeline import GeometricHazardPipeline
 from .geometry import (
     CameraIntrinsics,
@@ -35,17 +36,24 @@ from .health import (
     Stream,
     TransformBatchObservation,
     geometric_projection_support_reason,
+    rgb_projection_support_reason,
 )
 from .node import InputHealthNode, _stamp_ns
-from .temporal import ConfirmedHazard, HazardTrackerConfig, Pose3
+from .temporal import (
+    ConfirmedHazard,
+    EvidenceSource,
+    HazardTrackerConfig,
+    Pose3,
+)
 
 
 class GeometricHazardNode(InputHealthNode):
-    """Carry supported protrusions through odom confirmation to PointCloud2."""
+    """Carry supported low-profile hazards through odom to PointCloud2."""
 
     def __init__(self) -> None:
         self._pipeline = GeometricHazardPipeline()
         self._pending_depth: tuple[int, tuple[int, ...]] | None = None
+        self._pending_rgb: tuple[int, bytes] | None = None
         self._last_ground: GroundEstimate | None = None
         self._last_nominal_ground_angle_error_degrees: float | None = None
         self._last_candidate_count = 0
@@ -54,12 +62,46 @@ class GeometricHazardNode(InputHealthNode):
         self._cloud_publish_count = 0
         self._pending_depth_drop_count = 0
         self._processed_depth_count = 0
+        self._pending_rgb_drop_count = 0
+        self._processed_rgb_count = 0
+        self._latest_processed_rgb_stamp_ns = 0
+        self._last_cable_candidate_count = 0
+        self._rgb_cable_confirmation_count = 0
+        self._diagnostic_pink_pixel_count: int | None = None
         self._latest_processed_depth_stamp_ns = 0
         self._geometric_degradation_reason = ""
         self._last_published_retained_signature: tuple[object, ...] = ()
         self._had_operational_hazard_output = False
         self._active_retained_count = 0
         super().__init__()
+
+        self._diagnostic_pink_enabled = bool(
+            self.declare_parameter(
+                "diagnostic_pink_comparison_enabled", False
+            ).value
+        )
+        self._diagnostic_pink_config = DiagnosticPinkConfig(
+            minimum_red=int(
+                self.declare_parameter(
+                    "diagnostic_pink_minimum_red", 90
+                ).value
+            ),
+            minimum_red_over_green=int(
+                self.declare_parameter(
+                    "diagnostic_pink_minimum_red_over_green", 10
+                ).value
+            ),
+            minimum_blue_over_green=int(
+                self.declare_parameter(
+                    "diagnostic_pink_minimum_blue_over_green", 5
+                ).value
+            ),
+            maximum_red_blue_difference=int(
+                self.declare_parameter(
+                    "diagnostic_pink_maximum_red_blue_difference", 60
+                ).value
+            ),
+        )
 
         ground_config = GroundEstimatorConfig(
             sample_stride_px=int(
@@ -131,6 +173,49 @@ class GeometricHazardNode(InputHealthNode):
                 ).value
             ),
         )
+        cable_config = TrainingFreeCableConfig(
+            local_contrast_threshold=float(
+                self.declare_parameter(
+                    "cable_local_contrast_threshold", 24.0
+                ).value
+            ),
+            maximum_half_width_px=int(
+                self.declare_parameter(
+                    "cable_maximum_half_width_px", 3
+                ).value
+            ),
+            minimum_component_pixels=int(
+                self.declare_parameter(
+                    "cable_minimum_component_pixels", 16
+                ).value
+            ),
+            minimum_length_px=float(
+                self.declare_parameter("cable_minimum_length_px", 16.0).value
+            ),
+            minimum_apparent_width_px=float(
+                self.declare_parameter(
+                    "cable_minimum_apparent_width_px", 1.5
+                ).value
+            ),
+            maximum_apparent_width_px=float(
+                self.declare_parameter(
+                    "cable_maximum_apparent_width_px", 6.0
+                ).value
+            ),
+            minimum_physical_span_m=float(
+                self.declare_parameter(
+                    "cable_minimum_physical_span_m", 0.06
+                ).value
+            ),
+            maximum_ground_age_ns=int(
+                float(
+                    self.declare_parameter(
+                        "cable_maximum_ground_age_ms", 500.0
+                    ).value
+                )
+                * 1_000_000
+            ),
+        )
         tracker_config = HazardTrackerConfig(
             association_radius_m=float(
                 self.declare_parameter("association_radius_m", 0.08).value
@@ -163,6 +248,7 @@ class GeometricHazardNode(InputHealthNode):
         self._pipeline = GeometricHazardPipeline(
             ground_config=ground_config,
             geometry_config=geometry_config,
+            cable_config=cable_config,
             tracker_config=tracker_config,
         )
         cloud_topic = str(
@@ -195,7 +281,10 @@ class GeometricHazardNode(InputHealthNode):
     def _after_camera_info(
         self, stream: Stream, observation: CameraInfoObservation
     ) -> None:
-        if stream is not Stream.DEPTH_CAMERA_INFO:
+        if stream not in (
+            Stream.COLOR_CAMERA_INFO,
+            Stream.DEPTH_CAMERA_INFO,
+        ):
             return
         if (
             observation.frame_id != self._camera_frame
@@ -215,17 +304,20 @@ class GeometricHazardNode(InputHealthNode):
         ):
             self._block_new_confirmation("camera_info:invalid")
             return
-        self._pipeline.set_intrinsics(
-            CameraIntrinsics(
-                width=observation.width,
-                height=observation.height,
-                fx=observation.fx,
-                fy=observation.fy,
-                cx=observation.cx,
-                cy=observation.cy,
-            )
+        intrinsics = CameraIntrinsics(
+            width=observation.width,
+            height=observation.height,
+            fx=observation.fx,
+            fy=observation.fy,
+            cx=observation.cx,
+            cy=observation.cy,
         )
-        self._try_process_pending_depth()
+        if stream is Stream.DEPTH_CAMERA_INFO:
+            self._pipeline.set_intrinsics(intrinsics)
+            self._try_process_pending_depth()
+        else:
+            self._pipeline.set_rgb_intrinsics(intrinsics)
+            self._try_process_pending_rgb()
 
     def _before_odom(self, message: Odometry) -> None:
         stamp_ns = _stamp_ns(message.header.stamp)
@@ -263,6 +355,7 @@ class GeometricHazardNode(InputHealthNode):
     def _after_odom(self, observation: OdomObservation) -> None:
         del observation
         self._try_process_pending_depth()
+        self._try_process_pending_rgb()
 
     def _after_tf(
         self,
@@ -305,6 +398,7 @@ class GeometricHazardNode(InputHealthNode):
             self._block_new_confirmation("tf:unusable")
             return
         self._try_process_pending_depth()
+        self._try_process_pending_rgb()
 
     def _after_image(
         self,
@@ -312,6 +406,29 @@ class GeometricHazardNode(InputHealthNode):
         message: Image,
         observation: ImageObservation,
     ) -> None:
+        if stream is Stream.COLOR_IMAGE:
+            if (
+                observation.sensor_stamp_ns <= 0
+                or observation.frame_id != self._camera_frame
+                or observation.encoding != "rgb8"
+                or observation.step < observation.width * 3
+                or observation.data_size
+                < observation.step * observation.height
+            ):
+                self._block_new_confirmation("color:invalid")
+                return
+            try:
+                values = _rgb_values(message)
+            except ValueError as error:
+                self.get_logger().warning(
+                    f"RGB cable path rejected frame: {error}"
+                )
+                return
+            if self._pending_rgb is not None:
+                self._pending_rgb_drop_count += 1
+            self._pending_rgb = (observation.sensor_stamp_ns, values)
+            self._try_process_pending_rgb()
+            return
         if stream is not Stream.DEPTH_IMAGE:
             return
         if (
@@ -371,6 +488,52 @@ class GeometricHazardNode(InputHealthNode):
             self._confirmed_observation_count += len(result.confirmed)
             self._latest_confirmation_spread_m = max(
                 confirmed.spatial_spread_m for confirmed in result.confirmed
+            )
+        self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
+        self._publish_health()
+        self._try_process_pending_rgb()
+
+    def _try_process_pending_rgb(self) -> None:
+        if self._pending_rgb is None:
+            return
+        stamp_ns, values = self._pending_rgb
+        projection_reason = rgb_projection_support_reason(self._snapshot())
+        if projection_reason:
+            self._block_new_confirmation(projection_reason)
+            return
+        if self._pipeline.alignment_at(stamp_ns) is None:
+            self._geometric_degradation_reason = (
+                self._pipeline.alignment_reason or "odom:missing"
+            )
+            self._publish_health()
+            return
+        result = self._pipeline.process_rgb(stamp_ns, values)
+        if result is None:
+            self._geometric_degradation_reason = "ground:unavailable"
+            self._publish_health()
+            return
+        if self._diagnostic_pink_enabled:
+            self._diagnostic_pink_pixel_count = (
+                self._pipeline.diagnostic_pink_count(
+                    values,
+                    self._diagnostic_pink_config,
+                )
+            )
+        self._pending_rgb = None
+        self._geometric_degradation_reason = result.degradation_reason
+        self._processed_rgb_count += 1
+        self._latest_processed_rgb_stamp_ns = stamp_ns
+        self._last_cable_candidate_count = len(result.candidates)
+        rgb_confirmed = [
+            confirmed
+            for confirmed in result.confirmed
+            if EvidenceSource.RGB_CABLE in confirmed.evidence
+        ]
+        if rgb_confirmed:
+            self._rgb_cable_confirmation_count += len(rgb_confirmed)
+            self._confirmed_observation_count += len(rgb_confirmed)
+            self._latest_confirmation_spread_m = max(
+                confirmed.spatial_spread_m for confirmed in rgb_confirmed
             )
         self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
         self._publish_health()
@@ -486,6 +649,28 @@ class GeometricHazardNode(InputHealthNode):
                 "geometry.latest_processed_depth_stamp_ns": (
                     self._latest_processed_depth_stamp_ns
                 ),
+                "cable.provider": "training_free_thin_line",
+                "cable.latest_candidate_count": (
+                    self._last_cable_candidate_count
+                ),
+                "cable.confirmed_observation_count": (
+                    self._rgb_cable_confirmation_count
+                ),
+                "cable.confirmation_observations": 2,
+                "cable.pending_rgb_drops": self._pending_rgb_drop_count,
+                "cable.processed_rgb_count": self._processed_rgb_count,
+                "cable.latest_processed_rgb_stamp_ns": (
+                    self._latest_processed_rgb_stamp_ns
+                ),
+                "cable.rgb_depth_synchronizer": "disabled",
+                "cable.projection": "ray_observed_ground",
+                "cable.diagnostic_pink_comparison_enabled": (
+                    self._diagnostic_pink_enabled
+                ),
+                "cable.diagnostic_pink_pixel_count": (
+                    self._diagnostic_pink_pixel_count
+                ),
+                "cable.diagnostic_pink_operational": False,
                 "geometry.active_retained_hazard_count": (
                     self._active_retained_count
                 ),
@@ -537,6 +722,19 @@ def _depth_values(message: Image) -> tuple[int, ...]:
     )
 
 
+def _rgb_values(message: Image) -> bytes:
+    row_bytes = message.width * 3
+    required_bytes = message.step * message.height
+    if len(message.data) < required_bytes:
+        raise ValueError("RGB payload is shorter than its stride")
+    if message.step == row_bytes:
+        return bytes(message.data[: row_bytes * message.height])
+    return b"".join(
+        bytes(message.data[row * message.step : row * message.step + row_bytes])
+        for row in range(message.height)
+    )
+
+
 def _point_cloud(
     retained: tuple[ConfirmedHazard, ...],
     *,
@@ -554,6 +752,7 @@ def _point_cloud(
             point,
             hazard.spatial_spread_m,
             divmod(hazard.sensor_stamp_ns, 1_000_000_000),
+            _evidence_mask(hazard),
         )
         for hazard in retained
         for point in hazard.points_odom
@@ -582,22 +781,38 @@ def _point_cloud(
             datatype=PointField.UINT32,
             count=1,
         ),
+        PointField(
+            name="evidence_mask",
+            offset=24,
+            datatype=PointField.UINT8,
+            count=1,
+        ),
     ]
     cloud.is_bigendian = False
-    cloud.point_step = 24
+    cloud.point_step = 28
     cloud.row_step = cloud.point_step * cloud.width
     cloud.data = b"".join(
         struct.pack(
-            "<ffffiI",
+            "<ffffiIB3x",
             *point,
             confirmation_spread_m,
             stamp_parts[0],
             stamp_parts[1],
+            evidence_mask,
         )
-        for point, confirmation_spread_m, stamp_parts in points
+        for point, confirmation_spread_m, stamp_parts, evidence_mask in points
     )
     cloud.is_dense = True
     return cloud
+
+
+def _evidence_mask(hazard: ConfirmedHazard) -> int:
+    mask = 0
+    if EvidenceSource.STRONG_GEOMETRY in hazard.evidence:
+        mask |= 1
+    if EvidenceSource.RGB_CABLE in hazard.evidence:
+        mask |= 2
+    return mask
 
 
 def main(args: list[str] | None = None) -> None:

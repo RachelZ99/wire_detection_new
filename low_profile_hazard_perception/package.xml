@@ -2,7 +2,7 @@
 <package format="3">
   <name>low_profile_hazard_perception</name>
   <version>0.1.0</version>
-  <description>Asynchronous RGB-D health and odom-aligned geometric hazards.</description>
+  <description>Asynchronous RGB-D health and odom-aligned low-profile hazards.</description>
   <maintainer email="maintainers@example.invalid">Low-profile perception maintainers</maintainer>
   <license>Apache-2.0</license>
 
