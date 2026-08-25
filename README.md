@@ -69,7 +69,21 @@ This replay additionally requires at least one non-empty, meaningfully stamped
 an observed camera-to-floor distance in the measured 0.20–0.25 m range. The
 nominal 0.15 m TF value is reported as a consistency comparison, not used as
 floor truth. It also rejects outputs without robust height/physical span,
-cross-observation spread above 80 mm, or a trail-like cloud extent.
+cross-observation spread above 25 mm, or a trail-like cloud extent.
+
+For event-level acceptance, add the measured `odom` annotations for the bag:
+
+```bash
+ros2 run low_profile_hazard_perception replay_geometric_hazard \
+  /path/to/wire_rgbd_strip_01 --repeat 2 \
+  --expected-power-strip-center ODOM_X ODOM_Y \
+  --reflective-floor-region MIN_X MAX_X MIN_Y MAX_Y
+```
+
+The annotated form requires a strong confirmed cloud at the power-strip region
+and rejects two or more confirmed clouds in each reflective-floor negative
+region. The repository does not invent these coordinates: they must come from
+the reference-scene annotation paired with the external bag.
 
 The command starts a clean input-health node for each pass, replays with ROS
 simulation time, and fails if delivered input counts or canonical health fields
@@ -147,3 +161,8 @@ support alignment or confirmation.
 The resulting `sensor_msgs/PointCloud2` uses frame `odom` and the confirming
 observation's sensor stamp. The node publishes no slowdown, stop, or replanning
 command, and it exposes no candidate cloud on the operational topic.
+
+The internal field remains named `sensor_stamp_ns` intentionally: the current
+DCW2 profile has `use_hardware_time: false`, and the repository has not yet
+proved clock offset/drift compensation needed to call this a true capture time.
+Host receipt/callback time is never substituted for it.

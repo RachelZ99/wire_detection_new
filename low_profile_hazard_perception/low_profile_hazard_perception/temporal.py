@@ -69,6 +69,10 @@ class Pose3:
             rotation=_multiply(correction, self.rotation),
         ).normalized()
 
+    def normal_error_to_parent_up_degrees(self, normal_local: Point3) -> float:
+        normal_parent = _normalize_vector(_rotate(self.rotation, normal_local))
+        return degrees(acos(max(-1.0, min(1.0, normal_parent[2]))))
+
 
 class OdomPoseCache:
     """Interpolate translation/quaternion in a bounded timestamp cache."""
@@ -148,14 +152,60 @@ class OdomPoseCache:
             upper < len(self._stamps)
             and self._stamps[upper] == sensor_stamp_ns
         ):
-            return self._poses[upper]
+            supported = (
+                upper > 0 and self._segment_is_supported(upper - 1, upper)
+            ) or (
+                upper + 1 < len(self._stamps)
+                and self._segment_is_supported(upper, upper + 1)
+            )
+            return self._poses[upper] if supported else None
         if upper == 0 or upper == len(self._stamps):
             return None
         lower = upper - 1
+        if not self._segment_is_supported(lower, upper):
+            return None
+        interval = self._stamps[upper] - self._stamps[lower]
+        fraction = (sensor_stamp_ns - self._stamps[lower]) / interval
+        first = self._poses[lower]
+        second = self._poses[upper]
+        translation = tuple(
+            first.translation[index]
+            + fraction * (second.translation[index] - first.translation[index])
+            for index in range(3)
+        )
+        return Pose3(
+            translation=translation,
+            rotation=_slerp(first.rotation, second.rotation, fraction),
+        )
+
+    def continuous_between(
+        self, first_stamp_ns: int, second_stamp_ns: int
+    ) -> bool:
+        """Check every odom segment spanning two observation stamps."""
+        if first_stamp_ns > second_stamp_ns:
+            first_stamp_ns, second_stamp_ns = (
+                second_stamp_ns,
+                first_stamp_ns,
+            )
+        first_upper = bisect_left(self._stamps, first_stamp_ns)
+        first_index = first_upper
+        if (
+            first_upper == len(self._stamps)
+            or self._stamps[first_upper] != first_stamp_ns
+        ):
+            first_index -= 1
+        second_index = bisect_left(self._stamps, second_stamp_ns)
+        if first_index < 0 or second_index >= len(self._stamps):
+            return False
+        return all(
+            self._segment_is_supported(index, index + 1)
+            for index in range(first_index, second_index)
+        )
+
+    def _segment_is_supported(self, lower: int, upper: int) -> bool:
         interval = self._stamps[upper] - self._stamps[lower]
         if interval <= 0 or interval > self._maximum_interpolation_gap_ns:
-            return None
-        fraction = (sensor_stamp_ns - self._stamps[lower]) / interval
+            return False
         first = self._poses[lower]
         second = self._poses[upper]
         translation_jump = sqrt(
@@ -173,19 +223,9 @@ class OdomPoseCache:
             )
         )
         rotation_jump = degrees(2.0 * acos(max(-1.0, min(1.0, rotation_dot))))
-        if (
-            translation_jump > self._maximum_translation_jump_m
-            or rotation_jump > self._maximum_rotation_jump_degrees
-        ):
-            return None
-        translation = tuple(
-            first.translation[index]
-            + fraction * (second.translation[index] - first.translation[index])
-            for index in range(3)
-        )
-        return Pose3(
-            translation=translation,
-            rotation=_slerp(first.rotation, second.rotation, fraction),
+        return (
+            translation_jump <= self._maximum_translation_jump_m
+            and rotation_jump <= self._maximum_rotation_jump_degrees
         )
 
 
@@ -256,6 +296,9 @@ class HazardTracker:
     def __init__(self, config: HazardTrackerConfig | None = None) -> None:
         self.config = config or HazardTrackerConfig()
         self._tracks: list[_Track] = []
+
+    def clear(self) -> None:
+        self._tracks.clear()
 
     def observe(
         self, observation: HazardObservation

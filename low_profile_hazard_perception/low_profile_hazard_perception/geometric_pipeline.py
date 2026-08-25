@@ -31,6 +31,7 @@ class GeometricPipelineResult:
     ground: GroundEstimate
     candidates: tuple[GeometricCandidate, ...]
     confirmed: tuple[ConfirmedHazard, ...]
+    nominal_ground_angle_error_degrees: float | None
 
 
 class GeometricHazardPipeline:
@@ -50,6 +51,7 @@ class GeometricHazardPipeline:
         self.intrinsics: CameraIntrinsics | None = None
         self.base_from_camera: Pose3 | None = None
         self.nominal_camera_height_m = 0.0
+        self._last_aligned_observation_stamp_ns: int | None = None
 
     def set_intrinsics(self, intrinsics: CameraIntrinsics) -> None:
         self.intrinsics = intrinsics
@@ -81,6 +83,14 @@ class GeometricHazardPipeline:
         odom_from_base = self.odom.interpolate(sensor_stamp_ns)
         if odom_from_base is None:
             return None
+        if (
+            self._last_aligned_observation_stamp_ns is not None
+            and not self.odom.continuous_between(
+                self._last_aligned_observation_stamp_ns, sensor_stamp_ns
+            )
+        ):
+            self.tracker.clear()
+        self._last_aligned_observation_stamp_ns = sensor_stamp_ns
         ground = self.ground_estimator.estimate(
             depth_values,
             self.intrinsics,
@@ -93,6 +103,11 @@ class GeometricHazardPipeline:
                 ground=ground,
                 candidates=(),
                 confirmed=(),
+                nominal_ground_angle_error_degrees=(
+                    self.base_from_camera.normal_error_to_parent_up_degrees(
+                        ground.model.normal
+                    )
+                ),
             )
         observed_base_from_camera = self.base_from_camera.with_observed_ground(
             ground.model.normal, ground.model.camera_height_m
@@ -125,4 +140,9 @@ class GeometricHazardPipeline:
             ground=ground,
             candidates=candidates,
             confirmed=tuple(confirmed),
+            nominal_ground_angle_error_degrees=(
+                self.base_from_camera.normal_error_to_parent_up_degrees(
+                    ground.model.normal
+                )
+            ),
         )

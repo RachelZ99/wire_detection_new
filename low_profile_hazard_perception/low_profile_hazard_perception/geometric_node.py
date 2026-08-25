@@ -45,6 +45,7 @@ class GeometricHazardNode(InputHealthNode):
         self._pipeline = GeometricHazardPipeline()
         self._pending_depth: tuple[int, tuple[int, ...]] | None = None
         self._last_ground: GroundEstimate | None = None
+        self._last_nominal_ground_angle_error_degrees: float | None = None
         self._last_candidate_count = 0
         self._confirmed_observation_count = 0
         self._latest_confirmation_spread_m: float | None = None
@@ -296,6 +297,9 @@ class GeometricHazardNode(InputHealthNode):
         if result is None:
             return
         self._last_ground = result.ground
+        self._last_nominal_ground_angle_error_degrees = (
+            result.nominal_ground_angle_error_degrees
+        )
         self._last_candidate_count = len(result.candidates)
         if not result.confirmed:
             self._publish_health()
@@ -348,6 +352,9 @@ class GeometricHazardNode(InputHealthNode):
                 "ground.camera_height_m": estimate.model.camera_height_m,
                 "ground.nominal_height_error_m": (
                     metrics.nominal_height_error_m
+                ),
+                "ground.nominal_angle_error_degrees": (
+                    self._last_nominal_ground_angle_error_degrees
                 ),
             }
         ground.update(

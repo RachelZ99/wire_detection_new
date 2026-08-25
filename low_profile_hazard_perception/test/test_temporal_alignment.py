@@ -109,6 +109,10 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
             Pose3(translation=(0.03, 0.0, 0.0), rotation=_yaw(0.0)),
         )
         self.assertIsNone(stale.interpolate(1_150_000_000))
+        self.assertIsNone(stale.interpolate(1_000_000_000))
+        self.assertFalse(
+            stale.continuous_between(1_000_000_000, 1_300_000_000)
+        )
 
         jumped = OdomPoseCache()
         jumped.add(1_000_000_000, Pose3.identity())

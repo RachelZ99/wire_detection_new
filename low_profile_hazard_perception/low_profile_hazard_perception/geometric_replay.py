@@ -92,6 +92,16 @@ class _Collector(Node):
                 "p20_height_m": _percentile(z_values, 0.20),
                 "p90_height_m": _percentile(z_values, 0.90),
                 "horizontal_span_m": round(horizontal_span_m, 6),
+                "centroid_x_m": (
+                    round(sum(x_values) / len(x_values), 6)
+                    if x_values
+                    else None
+                ),
+                "centroid_y_m": (
+                    round(sum(y_values) / len(y_values), 6)
+                    if y_values
+                    else None
+                ),
             }
         )
 
@@ -201,6 +211,29 @@ def _parse_args(args: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--minimum-measured-height", type=float, default=0.20)
     parser.add_argument("--maximum-measured-height", type=float, default=0.25)
     parser.add_argument(
+        "--maximum-alignment-spread", type=float, default=0.025
+    )
+    parser.add_argument(
+        "--expected-power-strip-center",
+        type=float,
+        nargs=2,
+        metavar=("ODOM_X", "ODOM_Y"),
+    )
+    parser.add_argument(
+        "--expected-power-strip-radius", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--reflective-floor-region",
+        type=float,
+        nargs=4,
+        action="append",
+        metavar=("MIN_X", "MAX_X", "MIN_Y", "MAX_Y"),
+        help=(
+            "Reject a persistent (two-cloud) confirmed event in this "
+            "annotated odom region; may be supplied more than once."
+        ),
+    )
+    parser.add_argument(
         "--health-topic", default="/low_profile_hazard_perception/health"
     )
     parser.add_argument(
@@ -213,6 +246,8 @@ def _parse_args(args: list[str] | None) -> argparse.Namespace:
         parser.error("--repeat must be at least 2")
     if parsed.rate <= 0.0:
         parser.error("--rate must be positive")
+    if parsed.maximum_alignment_spread <= 0.0:
+        parser.error("--maximum-alignment-spread must be positive")
     if not parsed.bag.exists():
         parser.error(f"bag does not exist: {parsed.bag}")
     return parsed
@@ -288,6 +323,35 @@ def main(args: list[str] | None = None) -> None:
         raise SystemExit(
             "an operational cloud has a trail-like spatial extent"
         )
+    if options.expected_power_strip_center is not None:
+        expected_x, expected_y = options.expected_power_strip_center
+        matching_power_strip = [
+            cloud
+            for cloud in strong_clouds
+            if (
+                (cloud["centroid_x_m"] - expected_x) ** 2
+                + (cloud["centroid_y_m"] - expected_y) ** 2
+            )
+            ** 0.5
+            <= options.expected_power_strip_radius
+        ]
+        if not matching_power_strip:
+            raise SystemExit(
+                "no confirmed strong protrusion overlaps the annotated "
+                "reference power-strip region"
+            )
+    for region in options.reflective_floor_region or []:
+        minimum_x, maximum_x, minimum_y, maximum_y = region
+        persistent_count = sum(
+            minimum_x <= cloud["centroid_x_m"] <= maximum_x
+            and minimum_y <= cloud["centroid_y_m"] <= maximum_y
+            for cloud in clouds
+        )
+        if persistent_count >= 2:
+            raise SystemExit(
+                "a persistent confirmed event appeared in an annotated "
+                "reflective-floor region"
+            )
     values = baseline["health"]["stable_values"]
     measured_height = float(values["ground.camera_height_m"])
     if not (
@@ -302,9 +366,9 @@ def main(args: list[str] | None = None) -> None:
     confirmation_spread = float(
         values["geometry.latest_confirmation_spread_m"]
     )
-    if confirmation_spread > 0.08:
+    if confirmation_spread > options.maximum_alignment_spread:
         raise SystemExit(
-            "confirmed observations exceeded the odom association radius: "
+            "confirmed observations exceeded the replay alignment spread: "
             f"{confirmation_spread:.3f} m"
         )
     output = json.dumps(

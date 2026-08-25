@@ -116,6 +116,21 @@ class GeometricPipelineTests(unittest.TestCase):
         self.assertEqual(first.candidates, ())
         self.assertEqual(second.confirmed, ())
 
+    def test_odom_outage_clears_cross_frame_confirmation(self) -> None:
+        depth, intrinsics = _scene(raised=True, reflective_hole=False)
+        pipeline = _pipeline(intrinsics)
+        first = pipeline.process_depth(1_000_000_000, depth)
+        assert first is not None
+        self.assertEqual(first.confirmed, ())
+        pipeline.add_odom(1_350_000_000, Pose3.identity())
+        pipeline.add_odom(1_450_000_000, Pose3.identity())
+
+        after_outage = pipeline.process_depth(1_400_000_000, depth)
+
+        assert after_outage is not None
+        self.assertEqual(len(after_outage.candidates), 1)
+        self.assertEqual(after_outage.confirmed, ())
+
 
 if __name__ == "__main__":
     unittest.main()
