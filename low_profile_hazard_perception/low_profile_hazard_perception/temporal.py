@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass, field
-from math import acos, sin, sqrt
+from enum import Enum
+from math import acos, degrees, sin, sqrt
 
 from .geometry import Point3
 
@@ -53,6 +54,21 @@ class Pose3:
         )
         return Pose3(inverse_translation, inverse_rotation)
 
+    def with_observed_ground(
+        self, normal_local: Point3, camera_height_m: float
+    ) -> "Pose3":
+        """Correct nominal tilt/height with the currently observed floor."""
+        normal_parent = _rotate(self.rotation, normal_local)
+        correction = _rotation_between(normal_parent, (0.0, 0.0, 1.0))
+        return Pose3(
+            translation=(
+                self.translation[0],
+                self.translation[1],
+                camera_height_m,
+            ),
+            rotation=_multiply(correction, self.rotation),
+        ).normalized()
+
 
 class OdomPoseCache:
     """Interpolate translation/quaternion in a bounded timestamp cache."""
@@ -62,17 +78,43 @@ class OdomPoseCache:
         *,
         maximum_samples: int = 512,
         maximum_age_ns: int = 5_000_000_000,
+        maximum_interpolation_gap_ns: int = 100_000_000,
+        maximum_translation_jump_m: float = 0.25,
+        maximum_rotation_jump_degrees: float = 45.0,
     ) -> None:
         if maximum_samples < 2:
             raise ValueError("maximum_samples must be at least two")
+        if maximum_age_ns <= 0 or maximum_interpolation_gap_ns <= 0:
+            raise ValueError("odom cache time bounds must be positive")
+        if maximum_translation_jump_m <= 0.0:
+            raise ValueError("maximum_translation_jump_m must be positive")
+        if not 0.0 < maximum_rotation_jump_degrees <= 180.0:
+            raise ValueError(
+                "maximum_rotation_jump_degrees must be in (0, 180]"
+            )
         self._maximum_samples = maximum_samples
         self._maximum_age_ns = maximum_age_ns
+        self._maximum_interpolation_gap_ns = maximum_interpolation_gap_ns
+        self._maximum_translation_jump_m = maximum_translation_jump_m
+        self._maximum_rotation_jump_degrees = maximum_rotation_jump_degrees
         self._stamps: list[int] = []
         self._poses: list[Pose3] = []
 
     @property
     def latest_stamp_ns(self) -> int | None:
         return self._stamps[-1] if self._stamps else None
+
+    @property
+    def maximum_interpolation_gap_ns(self) -> int:
+        return self._maximum_interpolation_gap_ns
+
+    @property
+    def maximum_translation_jump_m(self) -> float:
+        return self._maximum_translation_jump_m
+
+    @property
+    def maximum_rotation_jump_degrees(self) -> float:
+        return self._maximum_rotation_jump_degrees
 
     def add(self, sensor_stamp_ns: int, pose: Pose3) -> None:
         if sensor_stamp_ns <= 0:
@@ -111,11 +153,31 @@ class OdomPoseCache:
             return None
         lower = upper - 1
         interval = self._stamps[upper] - self._stamps[lower]
-        if interval <= 0:
+        if interval <= 0 or interval > self._maximum_interpolation_gap_ns:
             return None
         fraction = (sensor_stamp_ns - self._stamps[lower]) / interval
         first = self._poses[lower]
         second = self._poses[upper]
+        translation_jump = sqrt(
+            sum(
+                (second.translation[index] - first.translation[index]) ** 2
+                for index in range(3)
+            )
+        )
+        rotation_dot = abs(
+            sum(
+                left * right
+                for left, right in zip(
+                    first.rotation, second.rotation, strict=True
+                )
+            )
+        )
+        rotation_jump = degrees(2.0 * acos(max(-1.0, min(1.0, rotation_dot))))
+        if (
+            translation_jump > self._maximum_translation_jump_m
+            or rotation_jump > self._maximum_rotation_jump_degrees
+        ):
+            return None
         translation = tuple(
             first.translation[index]
             + fraction * (second.translation[index] - first.translation[index])
@@ -127,11 +189,15 @@ class OdomPoseCache:
         )
 
 
+class EvidenceSource(str, Enum):
+    STRONG_GEOMETRY = "STRONG_GEOMETRY"
+
+
 @dataclass(frozen=True)
 class HazardObservation:
     sensor_stamp_ns: int
     points_odom: tuple[Point3, ...]
-    evidence: str
+    evidence: EvidenceSource
     confidence: float
 
     @property
@@ -151,7 +217,7 @@ class ConfirmedHazard:
     points_odom: tuple[Point3, ...]
     centroid: Point3
     observation_count: int
-    evidence: tuple[str, ...]
+    evidence: tuple[EvidenceSource, ...]
     confidence: float
     spatial_spread_m: float
 
@@ -160,13 +226,10 @@ class ConfirmedHazard:
 class HazardTrackerConfig:
     association_radius_m: float = 0.08
     confirmation_window_ns: int = 350_000_000
-    required_observations: int = 2
 
     def __post_init__(self) -> None:
         if self.association_radius_m <= 0.0:
             raise ValueError("association_radius_m must be positive")
-        if self.required_observations < 2:
-            raise ValueError("required_observations must be at least two")
 
 
 @dataclass
@@ -175,7 +238,7 @@ class _Track:
     last_stamp_ns: int
     observation_centroids: list[Point3]
     latest_points: tuple[Point3, ...]
-    evidence: set[str] = field(default_factory=set)
+    evidence: set[EvidenceSource] = field(default_factory=set)
     confidence: float = 0.0
 
     @property
@@ -233,10 +296,7 @@ class HazardTracker:
                 confidence=observation.confidence,
             )
             self._tracks.append(track)
-        if (
-            len(track.observation_centroids)
-            < self.config.required_observations
-        ):
+        if len(track.observation_centroids) < 2:
             return ()
         spread = max(
             self._distance(point, track.centroid)
@@ -248,7 +308,9 @@ class HazardTracker:
                 points_odom=track.latest_points,
                 centroid=track.centroid,
                 observation_count=len(track.observation_centroids),
-                evidence=tuple(sorted(track.evidence)),
+                evidence=tuple(
+                    sorted(track.evidence, key=lambda item: item.value)
+                ),
                 confidence=track.confidence,
                 spatial_spread_m=spread,
             ),
@@ -266,6 +328,40 @@ def _normalize(quaternion: Quaternion) -> Quaternion:
     if norm <= 1e-12:
         raise ValueError("quaternion has zero norm")
     return tuple(value / norm for value in quaternion)
+
+
+def _normalize_vector(vector: Point3) -> Point3:
+    norm = sqrt(sum(value * value for value in vector))
+    if norm <= 1e-12:
+        raise ValueError("vector has zero norm")
+    return tuple(value / norm for value in vector)
+
+
+def _rotation_between(first: Point3, second: Point3) -> Quaternion:
+    first = _normalize_vector(first)
+    second = _normalize_vector(second)
+    dot = max(
+        -1.0,
+        min(1.0, sum(a * b for a, b in zip(first, second, strict=True))),
+    )
+    cross = (
+        first[1] * second[2] - first[2] * second[1],
+        first[2] * second[0] - first[0] * second[2],
+        first[0] * second[1] - first[1] * second[0],
+    )
+    if dot < -0.999999:
+        reference = (1.0, 0.0, 0.0)
+        if abs(first[0]) > 0.9:
+            reference = (0.0, 1.0, 0.0)
+        axis = _normalize_vector(
+            (
+                first[1] * reference[2] - first[2] * reference[1],
+                first[2] * reference[0] - first[0] * reference[2],
+                first[0] * reference[1] - first[1] * reference[0],
+            )
+        )
+        return axis[0], axis[1], axis[2], 0.0
+    return _normalize((cross[0], cross[1], cross[2], 1.0 + dot))
 
 
 def _multiply(first: Quaternion, second: Quaternion) -> Quaternion:

@@ -103,6 +103,22 @@ class ObservedGroundModelTests(unittest.TestCase):
         self.assertGreater(shifted.model.camera_height_m, 0.225)
         self.assertLess(shifted.model.camera_height_m, 0.235)
 
+        inconsistent_depth = _plane_depth_image(
+            width=160,
+            height=90,
+            intrinsics=intrinsics,
+            camera_height_m=0.300,
+            downward_pitch_degrees=12.0,
+        )
+        inconsistent = estimator.estimate(
+            inconsistent_depth,
+            intrinsics,
+            depth_unit_m=0.001,
+            nominal_camera_height_m=0.15,
+        )
+        self.assertFalse(inconsistent.accepted)
+        self.assertIn("temporal consistency", inconsistent.reason)
+
     def test_strong_geometry_requires_robust_local_height_support(
         self,
     ) -> None:

@@ -27,6 +27,7 @@ geometric_hazard:
     ground_minimum_inlier_ratio: 0.70
     ground_maximum_p90_residual_m: 0.008
     ground_minimum_spatial_coverage: 0.35
+    ground_minimum_temporal_consistency: 0.20
     ground_temporal_smoothing_factor: 0.35
 
     # Strong geometry begins at 15 mm and must have local metric support.

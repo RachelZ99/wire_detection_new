@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import signal
+import struct
 import subprocess
 import time
 from collections.abc import Callable
@@ -68,6 +69,19 @@ class _Collector(Node):
         )
 
     def _collect_cloud(self, message: PointCloud2) -> None:
+        points = [
+            struct.unpack_from("<fff", bytes(message.data), offset)
+            for offset in range(0, len(message.data), int(message.point_step))
+        ]
+        x_values = [point[0] for point in points]
+        y_values = [point[1] for point in points]
+        z_values = sorted(point[2] for point in points)
+        horizontal_span_m = 0.0
+        if points:
+            horizontal_span_m = (
+                (max(x_values) - min(x_values)) ** 2
+                + (max(y_values) - min(y_values)) ** 2
+            ) ** 0.5
         self.clouds.append(
             {
                 "stamp_ns": _stamp_ns(message.header.stamp),
@@ -75,6 +89,9 @@ class _Collector(Node):
                 "point_count": int(message.width) * int(message.height),
                 "point_step": int(message.point_step),
                 "data_sha256": hashlib.sha256(bytes(message.data)).hexdigest(),
+                "p20_height_m": _percentile(z_values, 0.20),
+                "p90_height_m": _percentile(z_values, 0.90),
+                "horizontal_span_m": round(horizontal_span_m, 6),
             }
         )
 
@@ -201,6 +218,13 @@ def _parse_args(args: list[str] | None) -> argparse.Namespace:
     return parsed
 
 
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    index = int(round((len(values) - 1) * fraction))
+    return round(values[index], 6)
+
+
 def _canonical(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "health": result["health"]["canonical"],
@@ -247,6 +271,23 @@ def main(args: list[str] | None = None) -> None:
         raise SystemExit(
             "operational clouds must be non-empty, stamped in odom"
         )
+    strong_clouds = [
+        cloud
+        for cloud in clouds
+        if cloud["p20_height_m"] is not None
+        and cloud["p20_height_m"] >= 0.014
+        and cloud["p90_height_m"] <= 0.151
+        and cloud["horizontal_span_m"] >= 0.04
+    ]
+    if not strong_clouds:
+        raise SystemExit(
+            "reference replay produced no robustly supported strong "
+            "protrusion cloud"
+        )
+    if any(cloud["horizontal_span_m"] > 0.75 for cloud in clouds):
+        raise SystemExit(
+            "an operational cloud has a trail-like spatial extent"
+        )
     values = baseline["health"]["stable_values"]
     measured_height = float(values["ground.camera_height_m"])
     if not (
@@ -257,6 +298,14 @@ def main(args: list[str] | None = None) -> None:
         raise SystemExit(
             "observed ground height is outside the measured installation "
             f"range: {measured_height:.3f} m"
+        )
+    confirmation_spread = float(
+        values["geometry.latest_confirmation_spread_m"]
+    )
+    if confirmation_spread > 0.08:
+        raise SystemExit(
+            "confirmed observations exceeded the odom association radius: "
+            f"{confirmation_spread:.3f} m"
         )
     output = json.dumps(
         {

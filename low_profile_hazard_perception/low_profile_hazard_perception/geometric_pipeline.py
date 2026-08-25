@@ -16,6 +16,7 @@ from .geometry import (
 )
 from .temporal import (
     ConfirmedHazard,
+    EvidenceSource,
     HazardObservation,
     HazardTracker,
     HazardTrackerConfig,
@@ -75,10 +76,10 @@ class GeometricHazardPipeline:
         *,
         depth_unit_m: float = 0.001,
     ) -> GeometricPipelineResult | None:
-        if self.intrinsics is None:
+        if self.intrinsics is None or self.base_from_camera is None:
             return None
-        odom_from_camera = self.alignment_at(sensor_stamp_ns)
-        if odom_from_camera is None:
+        odom_from_base = self.odom.interpolate(sensor_stamp_ns)
+        if odom_from_base is None:
             return None
         ground = self.ground_estimator.estimate(
             depth_values,
@@ -93,6 +94,10 @@ class GeometricHazardPipeline:
                 candidates=(),
                 confirmed=(),
             )
+        observed_base_from_camera = self.base_from_camera.with_observed_ground(
+            ground.model.normal, ground.model.camera_height_m
+        )
+        odom_from_camera = odom_from_base.compose(observed_base_from_camera)
         candidates = self.geometry_detector.detect(
             depth_values,
             self.intrinsics,
@@ -110,7 +115,7 @@ class GeometricHazardPipeline:
                     HazardObservation(
                         sensor_stamp_ns=sensor_stamp_ns,
                         points_odom=points_odom,
-                        evidence="STRONG_GEOMETRY",
+                        evidence=EvidenceSource.STRONG_GEOMETRY,
                         confidence=candidate.confidence,
                     )
                 )

@@ -77,7 +77,7 @@ class GroundEstimate:
 @dataclass(frozen=True)
 class GroundEstimatorConfig:
     sample_stride_px: int = 6
-    ransac_iterations: int = 140
+    ransac_iterations: int = 160
     ransac_score_max_samples: int = 1200
     inlier_threshold_m: float = 0.008
     minimum_support: int = 500
@@ -87,6 +87,7 @@ class GroundEstimatorConfig:
     maximum_ground_tilt_degrees: float = 25.0
     temporal_angle_tolerance_degrees: float = 4.0
     temporal_height_tolerance_m: float = 0.025
+    minimum_temporal_consistency: float = 0.20
     temporal_smoothing_factor: float = 0.35
     minimum_depth_m: float = 0.20
     maximum_depth_m: float = 4.0
@@ -102,6 +103,8 @@ class GroundEstimatorConfig:
             raise ValueError("minimum_support must be at least three")
         if not 0.0 < self.temporal_smoothing_factor <= 1.0:
             raise ValueError("temporal_smoothing_factor must be in (0, 1]")
+        if not 0.0 <= self.minimum_temporal_consistency <= 1.0:
+            raise ValueError("minimum_temporal_consistency must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -320,6 +323,11 @@ class GroundEstimator:
             return "ground residual is too large"
         if metrics.spatial_coverage < self.config.minimum_spatial_coverage:
             return "ground spatial coverage is too small"
+        if (
+            metrics.temporal_consistency
+            < self.config.minimum_temporal_consistency
+        ):
+            return "ground temporal consistency is too low"
         return ""
 
     @staticmethod

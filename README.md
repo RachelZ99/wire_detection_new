@@ -68,7 +68,8 @@ This replay additionally requires at least one non-empty, meaningfully stamped
 `odom` point cloud, deterministic point bytes and timestamps across runs, and
 an observed camera-to-floor distance in the measured 0.20–0.25 m range. The
 nominal 0.15 m TF value is reported as a consistency comparison, not used as
-floor truth.
+floor truth. It also rejects outputs without robust height/physical span,
+cross-observation spread above 80 mm, or a trail-like cloud extent.
 
 The command starts a clean input-health node for each pass, replays with ROS
 simulation time, and fails if delivered input counts or canonical health fields
@@ -132,12 +133,17 @@ Each valid depth frame is sparsely deprojected and fitted with a deterministic,
 direction-constrained robust observed-ground model. Health exposes its support,
 inlier ratio, median/P90 metric residual, spatial coverage, temporal
 consistency, measured camera height, and disagreement with nominal TF.
+Abruptly inconsistent ground models are rejected rather than smoothed into an
+accepted model. The observed normal and camera height correct the nominal
+camera-to-base tilt and height before points are carried into `odom`.
 
 Points at least 15 mm above that observed floor enter the strong-geometry path
 only when they have robust local metric support and physical span. Invalid
 reflective-floor depth is ignored as evidence. Every candidate is transformed
 with an interpolated odom pose at the depth sensor stamp; two observations must
 associate within 80 mm and 350 ms before any operational output is published.
+Odom brackets wider than 100 ms or containing a 0.25 m/45° discontinuity cannot
+support alignment or confirmation.
 The resulting `sensor_msgs/PointCloud2` uses frame `odom` and the confirming
 observation's sensor stamp. The node publishes no slowdown, stop, or replanning
 command, and it exposes no candidate cloud on the operational topic.

@@ -47,6 +47,7 @@ class GeometricHazardNode(InputHealthNode):
         self._last_ground: GroundEstimate | None = None
         self._last_candidate_count = 0
         self._confirmed_observation_count = 0
+        self._latest_confirmation_spread_m: float | None = None
         self._cloud_publish_count = 0
         self._pending_depth_drop_count = 0
         super().__init__()
@@ -84,6 +85,11 @@ class GeometricHazardNode(InputHealthNode):
             minimum_spatial_coverage=float(
                 self.declare_parameter(
                     "ground_minimum_spatial_coverage", 0.35
+                ).value
+            ),
+            minimum_temporal_consistency=float(
+                self.declare_parameter(
+                    "ground_minimum_temporal_consistency", 0.20
                 ).value
             ),
             temporal_smoothing_factor=float(
@@ -295,13 +301,14 @@ class GeometricHazardNode(InputHealthNode):
             self._publish_health()
             return
         self._confirmed_observation_count += len(result.confirmed)
-        points = tuple(
-            point
-            for confirmed in result.confirmed
-            for point in confirmed.points_odom
+        self._latest_confirmation_spread_m = max(
+            confirmed.spatial_spread_m for confirmed in result.confirmed
         )
-        self._cloud_publisher.publish(_point_cloud(points, stamp_ns))
-        self._cloud_publish_count += 1
+        for confirmed in result.confirmed:
+            self._cloud_publisher.publish(
+                _point_cloud(confirmed.points_odom, stamp_ns)
+            )
+            self._cloud_publish_count += 1
         self._publish_health()
 
     def _operational_hazard_output_enabled(self) -> bool:
@@ -349,12 +356,25 @@ class GeometricHazardNode(InputHealthNode):
                 "geometry.confirmed_observation_count": (
                     self._confirmed_observation_count
                 ),
+                "geometry.latest_confirmation_spread_m": (
+                    self._latest_confirmation_spread_m
+                ),
                 "geometry.cloud_publish_count": self._cloud_publish_count,
                 "geometry.pending_depth_drops": (
                     self._pending_depth_drop_count
                 ),
                 "geometry.alignment_frame": "odom",
                 "geometry.confirmation_observations": 2,
+                "odom.maximum_interpolation_gap_ms": (
+                    self._pipeline.odom.maximum_interpolation_gap_ns
+                    / 1_000_000
+                ),
+                "odom.maximum_translation_jump_m": (
+                    self._pipeline.odom.maximum_translation_jump_m
+                ),
+                "odom.maximum_rotation_jump_degrees": (
+                    self._pipeline.odom.maximum_rotation_jump_degrees
+                ),
             }
         )
         return ground

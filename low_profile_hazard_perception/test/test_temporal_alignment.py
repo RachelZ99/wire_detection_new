@@ -2,6 +2,7 @@ import math
 import unittest
 
 from low_profile_hazard_perception.temporal import (
+    EvidenceSource,
     HazardObservation,
     HazardTracker,
     HazardTrackerConfig,
@@ -61,7 +62,7 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
             HazardObservation(
                 sensor_stamp_ns=1_000_000_000,
                 points_odom=(first_pose.transform_point(first_in_base),),
-                evidence="STRONG_GEOMETRY",
+                evidence=EvidenceSource.STRONG_GEOMETRY,
                 confidence=0.9,
             )
         )
@@ -69,7 +70,7 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
             HazardObservation(
                 sensor_stamp_ns=1_100_000_000,
                 points_odom=(second_pose.transform_point(second_in_base),),
-                evidence="STRONG_GEOMETRY",
+                evidence=EvidenceSource.STRONG_GEOMETRY,
                 confidence=0.9,
             )
         )
@@ -91,12 +92,31 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
             HazardObservation(
                 sensor_stamp_ns=1_000_000_000,
                 points_odom=((0.8, 0.2, 0.04),),
-                evidence="STRONG_GEOMETRY",
+                evidence=EvidenceSource.STRONG_GEOMETRY,
                 confidence=0.95,
             )
         )
 
         self.assertEqual(confirmed, ())
+
+    def test_stale_or_discontinuous_odom_cannot_support_alignment(
+        self,
+    ) -> None:
+        stale = OdomPoseCache()
+        stale.add(1_000_000_000, Pose3.identity())
+        stale.add(
+            1_300_000_000,
+            Pose3(translation=(0.03, 0.0, 0.0), rotation=_yaw(0.0)),
+        )
+        self.assertIsNone(stale.interpolate(1_150_000_000))
+
+        jumped = OdomPoseCache()
+        jumped.add(1_000_000_000, Pose3.identity())
+        jumped.add(
+            1_080_000_000,
+            Pose3(translation=(0.50, 0.0, 0.0), rotation=_yaw(0.0)),
+        )
+        self.assertIsNone(jumped.interpolate(1_040_000_000))
 
 
 if __name__ == "__main__":

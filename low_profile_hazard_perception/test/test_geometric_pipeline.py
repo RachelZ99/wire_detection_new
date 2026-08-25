@@ -101,6 +101,8 @@ class GeometricPipelineTests(unittest.TestCase):
         self.assertEqual(first.confirmed, ())
         self.assertEqual(len(second.confirmed), 1)
         self.assertEqual(second.confirmed[0].sensor_stamp_ns, 1_100_000_000)
+        heights = sorted(point[2] for point in second.confirmed[0].points_odom)
+        self.assertAlmostEqual(heights[len(heights) // 2], 0.030, delta=0.004)
 
     def test_reflective_floor_holes_do_not_confirm_as_geometry(self) -> None:
         depth, intrinsics = _scene(raised=False, reflective_hole=True)
