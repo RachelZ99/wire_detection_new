@@ -122,8 +122,12 @@ class InputContractTests(unittest.TestCase):
                 step=640 * 2,
                 encoding="16UC1",
                 data_size=640 * 360 * 2,
-                processing_complete_time_ns=16_000_000,
             ),
+        )
+        monitor.record_processing_complete(
+            Stream.DEPTH_IMAGE,
+            receive_time_ns=10_000_000,
+            processing_complete_time_ns=16_000_000,
         )
         monitor.observe_camera_info(
             Stream.DEPTH_CAMERA_INFO,

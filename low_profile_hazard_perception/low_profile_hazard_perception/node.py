@@ -112,7 +112,7 @@ class InputHealthNode(Node):
 
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )

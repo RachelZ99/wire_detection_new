@@ -41,7 +41,6 @@ class ImageObservation:
     step: int
     encoding: str
     data_size: int
-    processing_complete_time_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -55,7 +54,6 @@ class CameraInfoObservation:
     fy: float
     cx: float
     cy: float
-    processing_complete_time_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -64,7 +62,6 @@ class OdomObservation:
     receive_time_ns: int
     frame_id: str
     child_frame_id: str
-    processing_complete_time_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -82,7 +79,6 @@ class TransformBatchObservation:
     transforms: tuple[Transform, ...]
     required_chain_available: bool
     input_error: str = ""
-    processing_complete_time_ns: int | None = None
 
 
 def validate_transform_batch(
@@ -311,9 +307,6 @@ class HealthMonitor:
             Stream.ODOM,
             sensor_stamp_ns=observation.sensor_stamp_ns,
             receive_time_ns=observation.receive_time_ns,
-            processing_complete_time_ns=(
-                observation.processing_complete_time_ns
-            ),
             frame_id=f"{observation.frame_id}->{observation.child_frame_id}",
             reason=reason,
         )
@@ -333,9 +326,6 @@ class HealthMonitor:
             stream,
             sensor_stamp_ns=observation.sensor_stamp_ns,
             receive_time_ns=observation.receive_time_ns,
-            processing_complete_time_ns=(
-                observation.processing_complete_time_ns
-            ),
             frame_id=frame_id,
             reason=reason,
         )
@@ -529,9 +519,6 @@ class HealthMonitor:
             record,
             sensor_stamp_ns=observation.sensor_stamp_ns,
             receive_time_ns=observation.receive_time_ns,
-            processing_complete_time_ns=(
-                observation.processing_complete_time_ns
-            ),
             frame_id=observation.frame_id,
             reason=reason,
         )
@@ -546,7 +533,6 @@ class HealthMonitor:
         *,
         sensor_stamp_ns: int,
         receive_time_ns: int,
-        processing_complete_time_ns: int | None,
         frame_id: str,
         reason: str,
     ) -> None:
@@ -555,7 +541,6 @@ class HealthMonitor:
             record,
             sensor_stamp_ns=sensor_stamp_ns,
             receive_time_ns=receive_time_ns,
-            processing_complete_time_ns=processing_complete_time_ns,
             frame_id=frame_id,
             reason=reason,
         )
@@ -566,7 +551,6 @@ class HealthMonitor:
         *,
         sensor_stamp_ns: int,
         receive_time_ns: int,
-        processing_complete_time_ns: int | None,
         frame_id: str,
         reason: str,
     ) -> None:
@@ -580,10 +564,6 @@ class HealthMonitor:
         record.last_sensor_stamp_ns = sensor_stamp_ns
         record.last_receive_time_ns = receive_time_ns
         record.frame_id = frame_id
-        if processing_complete_time_ns is not None:
-            record.processing_latency_ms = (
-                processing_complete_time_ns - receive_time_ns
-            ) / 1_000_000
 
     def _camera_info_consistent(
         self, image_stream: Stream, info_stream: Stream

@@ -93,7 +93,7 @@ The `diagnostic_msgs/DiagnosticArray` reports:
 
 `queue_drops` comes from explicit drop-oldest application queues and
 `transport_drops` comes only from the middleware `message_lost` event; neither
-is inferred from rate or age. Middleware histories are bounded to ten callbacks
-and processing work is bounded to the latest sample, so overload drops old work
-instead of accumulating decision latency. No `sensor_msgs/PointCloud2`,
-slowdown, stop, or replanning output is created by this ticket.
+is inferred from rate or age. Image middleware histories and processing work
+are both bounded to the latest sample, so overload drops old work instead of
+accumulating decision latency. No `sensor_msgs/PointCloud2`, slowdown, stop, or
+replanning output is created by this ticket.
