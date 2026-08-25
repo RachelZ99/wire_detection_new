@@ -70,7 +70,10 @@ This replay additionally requires at least one non-empty, meaningfully stamped
 an observed camera-to-floor distance in the measured 0.20–0.25 m range. The
 nominal 0.15 m TF value is reported as a consistency comparison, not used as
 floor truth. It also rejects outputs without robust height/physical span,
-cross-observation spread above 25 mm, or a trail-like cloud extent.
+cross-observation spread above 25 mm, or a trail-like cloud extent. The bag
+must continue supplying valid floor depth after the hazard enters the
+observation blind zone; the replay then verifies that the retained cloud is
+not cleared before the configured two-second conservative interval.
 
 For event-level acceptance, add the measured `odom` annotations for the bag:
 

@@ -54,6 +54,7 @@ class GeometricHazardNode(InputHealthNode):
         self._cloud_publish_count = 0
         self._pending_depth_drop_count = 0
         self._processed_depth_count = 0
+        self._latest_processed_depth_stamp_ns = 0
         self._geometric_degradation_reason = ""
         self._last_published_retained_signature: tuple[object, ...] = ()
         self._had_operational_hazard_output = False
@@ -360,6 +361,7 @@ class GeometricHazardNode(InputHealthNode):
             return
         self._geometric_degradation_reason = result.degradation_reason
         self._processed_depth_count += 1
+        self._latest_processed_depth_stamp_ns = stamp_ns
         self._last_ground = result.ground
         self._last_nominal_ground_angle_error_degrees = (
             result.nominal_ground_angle_error_degrees
@@ -481,6 +483,9 @@ class GeometricHazardNode(InputHealthNode):
                     self._pending_depth_drop_count
                 ),
                 "geometry.processed_depth_count": self._processed_depth_count,
+                "geometry.latest_processed_depth_stamp_ns": (
+                    self._latest_processed_depth_stamp_ns
+                ),
                 "geometry.active_retained_hazard_count": (
                     self._active_retained_count
                 ),

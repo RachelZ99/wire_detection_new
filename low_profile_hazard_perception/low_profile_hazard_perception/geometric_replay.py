@@ -24,6 +24,10 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import PointCloud2
 
+from .geometric_replay_audit import (
+    GeometricReplayCloud,
+    observation_blind_zone_retention_audit,
+)
 from .replay_result import ReplayResultAccumulator
 
 
@@ -457,12 +461,34 @@ def main(args: list[str] | None = None) -> None:
             "confirmed observations exceeded the replay alignment spread: "
             f"{confirmation_spread:.3f} m"
         )
+    try:
+        audit_clouds = [
+            GeometricReplayCloud(
+                clearing=bool(cloud["clearing"]),
+                source_stamp_max_ns=cloud["source_stamp_max_ns"],
+                stamp_ns=int(cloud["stamp_ns"]),
+            )
+            for cloud in clouds
+        ]
+        blind_zone_audit = observation_blind_zone_retention_audit(
+            audit_clouds,
+            latest_processed_depth_stamp_ns=int(
+                values["geometry.latest_processed_depth_stamp_ns"]
+            ),
+            minimum_retention_ns=int(
+                float(values["geometry.confirmed_retention_ms"])
+                * 1_000_000
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise SystemExit(f"blind-zone retention audit failed: {error}") from error
     output = json.dumps(
         {
             "repeat_count": options.repeat,
             "measured_camera_height_m": measured_height,
             "confirmed_cloud_count": len(hazard_clouds),
             "clearing_cloud_count": len(clouds) - len(hazard_clouds),
+            "observation_blind_zone_retention": blind_zone_audit,
             "canonical": baseline,
             "runs": results,
         },
