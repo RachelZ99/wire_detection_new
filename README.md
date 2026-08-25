@@ -52,9 +52,10 @@ ros2 run low_profile_hazard_perception replay_rgbd_health \
 
 The command starts a clean input-health node for each pass, replays with ROS
 simulation time, and fails if delivered input counts or canonical health fields
-differ. It also fails unless the final state is `HEALTHY`. Canonical comparison
-excludes the two host-time-dependent age values, while confirming those fields
-exist in every stream result. Live health always reports both ages.
+differ. It also fails unless the final state is `HEALTHY`, and fails if any
+transient `INVALID` state occurred. Canonical comparison excludes host-dependent
+age and processing-latency values; the JSON output retains their per-run ranges
+and the complete sequence of health transitions.
 
 The replayed inputs are independent subscriptions; there is no RGB-depth
 `ApproximateTime` gate or synchronized image-pair callback. The subscribed
@@ -83,14 +84,16 @@ The `diagnostic_msgs/DiagnosticArray` reports:
 
 - delivered 640×360 profiles, `rgb8`/`16UC1` encodings, frame IDs, sensor-stamp
   rates, delivered/valid/invalid counts, and CameraInfo consistency;
-- sensor-stamp age from the ROS clock and receive age from the host steady clock
-  as separate measurements;
-- missing streams, sensor-stale streams, receive-stale streams, and per-stream
-  queue drops as separate fields;
+- sensor-stamp age from the ROS clock, receive age from the host steady clock,
+  and receive-to-processing-complete latency as separate measurements;
+- missing streams, sensor-stale streams, receive-stale streams, capacity-one
+  application queue drops, and middleware transport drops as separate fields;
 - `DEGRADED` for absent/stale/lost inputs and `INVALID` for malformed image,
   CameraInfo, odom, or TF contracts.
 
-`queue_drops` is sourced only from the middleware `message_lost` event; it is
-not inferred from rate or age. Image subscription histories are bounded to the
-latest sample. No `sensor_msgs/PointCloud2`, slowdown, stop, or replanning output
-is created by this ticket.
+`queue_drops` comes from explicit drop-oldest application queues and
+`transport_drops` comes only from the middleware `message_lost` event; neither
+is inferred from rate or age. Middleware histories are bounded to ten callbacks
+and processing work is bounded to the latest sample, so overload drops old work
+instead of accumulating decision latency. No `sensor_msgs/PointCloud2`,
+slowdown, stop, or replanning output is created by this ticket.

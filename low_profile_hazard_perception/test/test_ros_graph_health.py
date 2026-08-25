@@ -167,10 +167,28 @@ def test_independent_inputs_drive_health_without_hazard_output() -> None:
         assert values["camera_info.color.consistent"] == "true"
         assert values["camera_info.depth.consistent"] == "true"
         assert values["operational_hazard_output_enabled"] == "false"
+        assert values["depth_image.processing_latency_ms"] != "unknown"
         topic_types = dict(health_node.get_topic_names_and_types())
         assert all(
             "sensor_msgs/msg/PointCloud2" not in types
             for types in topic_types.values()
+        )
+
+        invalid_tf = _transform(stamp, "odom", "base_footprint")
+        invalid_tf.transform.rotation.w = 0.0
+        publishers["tf"].publish(TFMessage(transforms=[invalid_tf]))
+        _spin_until(
+            executor,
+            lambda: "zero norm" in _values(latest[-1]).get("tf.reason", ""),
+        )
+        assert _values(latest[-1])["state"] == "INVALID"
+
+        publishers["tf"].publish(
+            TFMessage(transforms=[_transform(stamp, "odom", "base_footprint")])
+        )
+        _spin_until(
+            executor,
+            lambda: _values(latest[-1]).get("state") == "HEALTHY",
         )
 
         publishers["depth"].publish(_image(stamp, depth=True, height=400))

@@ -5,6 +5,7 @@ input_health:
     sensor_stale_after_ms: 500.0
     receive_stale_after_ms: 500.0
     health_publish_period_ms: 200.0
+    input_processing_period_ms: 5.0
     camera_frame: camera_1_color_optical_frame
     base_frame: base_footprint
     color_image_topic: /camera_1/color/image_raw

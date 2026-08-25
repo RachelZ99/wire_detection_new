@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from nav_msgs.msg import Odometry
+from rclpy.clock import Clock
+from rclpy.clock_type import ClockType
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -35,7 +39,9 @@ from .health import (
     Stream,
     Transform,
     TransformBatchObservation,
+    validate_transform_batch,
 )
+from .latest_input_queue import LatestInputQueue
 
 
 def _stamp_ns(stamp: object) -> int:
@@ -68,6 +74,9 @@ class InputHealthNode(Node):
         publish_period_ms = self.declare_parameter(
             "health_publish_period_ms", 200.0
         ).value
+        processing_period_ms = self.declare_parameter(
+            "input_processing_period_ms", 5.0
+        ).value
         self._camera_frame = self.declare_parameter(
             "camera_frame", "camera_1_color_optical_frame"
         ).value
@@ -83,6 +92,10 @@ class InputHealthNode(Node):
         )
         self._tf_buffer = Buffer(node=self)
         self._profile_logged = False
+        self._input_queues: dict[
+            Stream, LatestInputQueue[Callable[[], int]]
+        ] = {stream: LatestInputQueue() for stream in Stream}
+        self._steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
 
         health_topic = self.declare_parameter(
             "health_topic", "/low_profile_hazard_perception/health"
@@ -99,7 +112,7 @@ class InputHealthNode(Node):
 
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=1,
+            depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
@@ -174,6 +187,11 @@ class InputHealthNode(Node):
         self._health_timer = self.create_timer(
             float(publish_period_ms) / 1000.0, self._publish_health
         )
+        self._processing_timer = self.create_timer(
+            float(processing_period_ms) / 1000.0,
+            self._drain_input_queues,
+            clock=self._steady_clock,
+        )
         self._publish_health()
 
     def _topic(self, parameter: str, default: str) -> str:
@@ -187,62 +205,126 @@ class InputHealthNode(Node):
 
     def _on_message_lost(self, stream: Stream, event: object) -> None:
         count = max(0, int(event.total_count_change))
-        self._monitor.record_queue_drops(stream, count)
+        self._monitor.record_transport_drops(stream, count)
+        self._publish_health()
+
+    def _enqueue(
+        self,
+        stream: Stream,
+        work: Callable[[], int],
+        *,
+        sensor_stamp_ns: int,
+    ) -> None:
+        if self._input_queues[stream].offer(
+            work, sensor_stamp_ns=sensor_stamp_ns
+        ):
+            self._monitor.record_queue_drops(stream, 1)
+            self._publish_health()
+
+    def _drain_input_queues(self) -> None:
+        processed = False
+        for stream, queue in self._input_queues.items():
+            work = queue.take()
+            if work is None:
+                continue
+            receive_time_ns = work()
+            self._monitor.record_processing_complete(
+                stream,
+                receive_time_ns=receive_time_ns,
+                processing_complete_time_ns=time.monotonic_ns(),
+            )
+            processed = True
+        if processed:
+            self._publish_health()
+
+    def _process_immediately(
+        self,
+        stream: Stream,
+        work: Callable[[], int],
+        *,
+        sensor_stamp_ns: int,
+    ) -> None:
+        queue = self._input_queues[stream]
+        if queue.offer(work, sensor_stamp_ns=sensor_stamp_ns):
+            self._monitor.record_queue_drops(stream, 1)
+        pending = queue.take()
+        if pending is None:
+            return
+        receive_time_ns = pending()
+        self._monitor.record_processing_complete(
+            stream,
+            receive_time_ns=receive_time_ns,
+            processing_complete_time_ns=time.monotonic_ns(),
+        )
         self._publish_health()
 
     def _on_image(self, stream: Stream, message: Image) -> None:
-        self._monitor.observe_image(
-            stream,
-            ImageObservation(
-                sensor_stamp_ns=_stamp_ns(message.header.stamp),
-                receive_time_ns=time.monotonic_ns(),
-                frame_id=message.header.frame_id,
-                width=message.width,
-                height=message.height,
-                step=message.step,
-                encoding=message.encoding,
-                data_size=len(message.data),
-            ),
+        observation = ImageObservation(
+            sensor_stamp_ns=_stamp_ns(message.header.stamp),
+            receive_time_ns=time.monotonic_ns(),
+            frame_id=message.header.frame_id,
+            width=message.width,
+            height=message.height,
+            step=message.step,
+            encoding=message.encoding,
+            data_size=len(message.data),
         )
-        self._publish_health()
+        self._enqueue(
+            stream,
+            partial(self._process_image, stream, observation),
+            sensor_stamp_ns=observation.sensor_stamp_ns,
+        )
+
+    def _process_image(
+        self, stream: Stream, observation: ImageObservation
+    ) -> int:
+        self._monitor.observe_image(stream, observation)
+        return observation.receive_time_ns
 
     def _on_camera_info(self, stream: Stream, message: CameraInfo) -> None:
-        self._monitor.observe_camera_info(
-            stream,
-            CameraInfoObservation(
-                sensor_stamp_ns=_stamp_ns(message.header.stamp),
-                receive_time_ns=time.monotonic_ns(),
-                frame_id=message.header.frame_id,
-                width=message.width,
-                height=message.height,
-                fx=message.k[0],
-                fy=message.k[4],
-                cx=message.k[2],
-                cy=message.k[5],
-            ),
+        observation = CameraInfoObservation(
+            sensor_stamp_ns=_stamp_ns(message.header.stamp),
+            receive_time_ns=time.monotonic_ns(),
+            frame_id=message.header.frame_id,
+            width=message.width,
+            height=message.height,
+            fx=message.k[0],
+            fy=message.k[4],
+            cx=message.k[2],
+            cy=message.k[5],
         )
-        self._publish_health()
+        self._enqueue(
+            stream,
+            partial(self._process_camera_info, stream, observation),
+            sensor_stamp_ns=observation.sensor_stamp_ns,
+        )
+
+    def _process_camera_info(
+        self, stream: Stream, observation: CameraInfoObservation
+    ) -> int:
+        self._monitor.observe_camera_info(stream, observation)
+        return observation.receive_time_ns
 
     def _on_odom(self, message: Odometry) -> None:
-        self._monitor.observe_odom(
-            OdomObservation(
-                sensor_stamp_ns=_stamp_ns(message.header.stamp),
-                receive_time_ns=time.monotonic_ns(),
-                frame_id=message.header.frame_id,
-                child_frame_id=message.child_frame_id,
-            )
+        observation = OdomObservation(
+            sensor_stamp_ns=_stamp_ns(message.header.stamp),
+            receive_time_ns=time.monotonic_ns(),
+            frame_id=message.header.frame_id,
+            child_frame_id=message.child_frame_id,
         )
-        self._publish_health()
+        self._enqueue(
+            Stream.ODOM,
+            partial(self._process_odom, observation),
+            sensor_stamp_ns=observation.sensor_stamp_ns,
+        )
+
+    def _process_odom(self, observation: OdomObservation) -> int:
+        self._monitor.observe_odom(observation)
+        return observation.receive_time_ns
 
     def _on_tf(
         self, stream: Stream, is_static: bool, message: TFMessage
     ) -> None:
-        receive_time_ns = time.monotonic_ns()
-        for transform in message.transforms:
-            if is_static:
-                self._tf_buffer.set_transform_static(transform, "input_health")
-            else:
-                self._tf_buffer.set_transform(transform, "input_health")
         stamps = [
             _stamp_ns(transform.header.stamp)
             for transform in message.transforms
@@ -250,36 +332,78 @@ class InputHealthNode(Node):
         sensor_stamp_ns = max(
             stamps, default=self.get_clock().now().nanoseconds
         )
-        chain_available = self._tf_buffer.can_transform(
-            self._base_frame, self._camera_frame, Time()
-        )
-        self._monitor.observe_transforms(
+        work = partial(
+            self._process_tf,
             stream,
-            TransformBatchObservation(
-                sensor_stamp_ns=sensor_stamp_ns,
-                receive_time_ns=receive_time_ns,
-                transforms=tuple(
-                    Transform(
-                        parent_frame_id=transform.header.frame_id,
-                        child_frame_id=transform.child_frame_id,
-                        translation=(
-                            transform.transform.translation.x,
-                            transform.transform.translation.y,
-                            transform.transform.translation.z,
-                        ),
-                        rotation=(
-                            transform.transform.rotation.x,
-                            transform.transform.rotation.y,
-                            transform.transform.rotation.z,
-                            transform.transform.rotation.w,
-                        ),
-                    )
-                    for transform in message.transforms
-                ),
-                required_chain_available=chain_available,
+            is_static,
+            message,
+            time.monotonic_ns(),
+            sensor_stamp_ns,
+        )
+        if is_static:
+            self._process_immediately(
+                stream, work, sensor_stamp_ns=sensor_stamp_ns
+            )
+        else:
+            self._enqueue(stream, work, sensor_stamp_ns=sensor_stamp_ns)
+
+    def _process_tf(
+        self,
+        stream: Stream,
+        is_static: bool,
+        message: TFMessage,
+        receive_time_ns: int,
+        sensor_stamp_ns: int,
+    ) -> int:
+        observation = TransformBatchObservation(
+            sensor_stamp_ns=sensor_stamp_ns,
+            receive_time_ns=receive_time_ns,
+            transforms=tuple(
+                Transform(
+                    parent_frame_id=transform.header.frame_id,
+                    child_frame_id=transform.child_frame_id,
+                    translation=(
+                        transform.transform.translation.x,
+                        transform.transform.translation.y,
+                        transform.transform.translation.z,
+                    ),
+                    rotation=(
+                        transform.transform.rotation.x,
+                        transform.transform.rotation.y,
+                        transform.transform.rotation.z,
+                        transform.transform.rotation.w,
+                    ),
+                )
+                for transform in message.transforms
+            ),
+            required_chain_available=self._tf_buffer.can_transform(
+                self._base_frame, self._camera_frame, Time()
             ),
         )
-        self._publish_health()
+        if not validate_transform_batch(stream, observation):
+            try:
+                for transform in message.transforms:
+                    if is_static:
+                        self._tf_buffer.set_transform_static(
+                            transform, "input_health"
+                        )
+                    else:
+                        self._tf_buffer.set_transform(
+                            transform, "input_health"
+                        )
+            except Exception as error:  # tf2 supplies the diagnostic text.
+                observation = replace(
+                    observation,
+                    input_error=f"TF buffer rejected transform: {error}",
+                )
+        observation = replace(
+            observation,
+            required_chain_available=self._tf_buffer.can_transform(
+                self._base_frame, self._camera_frame, Time()
+            ),
+        )
+        self._monitor.observe_transforms(stream, observation)
+        return receive_time_ns
 
     def _snapshot(self) -> HealthSnapshot:
         return self._monitor.snapshot(
@@ -324,22 +448,32 @@ class InputHealthNode(Node):
             ],
             "sensor_age_clock": "ros_clock",
             "receive_age_clock": "steady_monotonic",
-            "queue_drop_source": "rmw_message_lost",
+            "queue_drop_source": "latest_input_queue",
+            "transport_drop_source": "rmw_message_lost",
             "operational_hazard_output_enabled": False,
         }
         for stream, health in snapshot.streams.items():
             prefix = stream.value
+            queue = self._input_queues[stream]
             values.update(
                 {
-                    f"{prefix}.delivered_count": health.delivered_count,
+                    f"{prefix}.delivered_count": queue.received_count,
+                    f"{prefix}.processed_count": queue.processed_count,
                     f"{prefix}.valid_count": health.valid_count,
                     f"{prefix}.invalid_count": health.invalid_count,
                     f"{prefix}.queue_drops": health.queue_drops,
+                    f"{prefix}.transport_drops": health.transport_drops,
                     f"{prefix}.sensor_stamp_age_ms": (
                         health.sensor_stamp_age_ms
                     ),
                     f"{prefix}.receive_age_ms": health.receive_age_ms,
+                    f"{prefix}.processing_latency_ms": (
+                        health.processing_latency_ms
+                    ),
                     f"{prefix}.approximate_rate_hz": (
+                        queue.approximate_received_rate_hz
+                    ),
+                    f"{prefix}.processed_rate_hz": (
                         health.approximate_rate_hz
                     ),
                     f"{prefix}.frame_id": health.frame_id,

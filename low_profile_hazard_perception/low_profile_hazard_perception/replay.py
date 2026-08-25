@@ -21,14 +21,17 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 
+from .replay_result import ReplayResultAccumulator
+
 
 class _HealthCollector(Node):
     def __init__(self, health_topic: str) -> None:
         super().__init__("replay_health_collector")
         self.latest: DiagnosticArray | None = None
+        self._result: ReplayResultAccumulator | None = None
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=1,
+            depth=1000,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
@@ -39,6 +42,24 @@ class _HealthCollector(Node):
     def _collect(self, message: DiagnosticArray) -> None:
         if message.status:
             self.latest = message
+            status = message.status[0]
+            if self._result is None:
+                self._result = ReplayResultAccumulator(
+                    diagnostic_name=status.name
+                )
+            self._result.record(
+                state=status.message,
+                values={item.key: item.value for item in status.values},
+            )
+
+    def clear(self) -> None:
+        self.latest = None
+        self._result = None
+
+    def report(self) -> dict[str, Any]:
+        if self._result is None:
+            raise RuntimeError("replay produced no perception-health result")
+        return self._result.report()
 
 
 def _spin_until(
@@ -52,26 +73,6 @@ def _spin_until(
         if predicate():
             return True
     return False
-
-
-def _canonical(message: DiagnosticArray) -> dict[str, Any]:
-    status = message.status[0]
-    values = {item.key: item.value for item in status.values}
-    volatile_suffixes = (".sensor_stamp_age_ms", ".receive_age_ms")
-    stable_values = {
-        key: value
-        for key, value in sorted(values.items())
-        if not key.endswith(volatile_suffixes)
-    }
-    age_fields = sorted(
-        key for key in values if key.endswith(volatile_suffixes)
-    )
-    return {
-        "diagnostic_name": status.name,
-        "state": status.message,
-        "stable_values": stable_values,
-        "age_fields_present": age_fields,
-    }
 
 
 def _stop(process: subprocess.Popen[bytes]) -> None:
@@ -111,7 +112,7 @@ def _run_once(
         )
         if not ready:
             raise RuntimeError("input health node did not become observable")
-        collector.latest = None
+        collector.clear()
         playback = subprocess.Popen(
             [
                 "ros2",
@@ -133,9 +134,7 @@ def _run_once(
         if playback.returncode != 0:
             raise RuntimeError(f"rosbag replay failed: {stderr.strip()}")
         _spin_until(collector, lambda: False, 1.0)
-        if collector.latest is None:
-            raise RuntimeError("replay produced no perception-health result")
-        return _canonical(collector.latest)
+        return collector.report()
     finally:
         _stop(launch)
         collector.destroy_node()
@@ -169,7 +168,7 @@ def _parse_args(args: list[str] | None) -> argparse.Namespace:
 
 def main(args: list[str] | None = None) -> None:
     options = _parse_args(args)
-    rclpy.init()
+    rclpy.init(args=[])
     try:
         results = [
             _run_once(
@@ -182,25 +181,47 @@ def main(args: list[str] | None = None) -> None:
         ]
     finally:
         rclpy.shutdown()
-    baseline = results[0]
+    baseline = results[0]["canonical"]
     for run_number, result in enumerate(results[1:], start=2):
-        if result != baseline:
+        if result["canonical"] != baseline:
             raise SystemExit(
                 "non-deterministic health result on run "
                 f"{run_number}:\n"
                 + json.dumps(
-                    {"first": baseline, "different": result},
+                    {"first": baseline, "different": result["canonical"]},
                     indent=2,
                     sort_keys=True,
                 )
             )
+    invalid_runs = [
+        run_number
+        for run_number, result in enumerate(results, start=1)
+        if result["invalid_observed"]
+    ]
+    if invalid_runs:
+        raise SystemExit(
+            "replay observed an INVALID health transition on runs "
+            + ", ".join(str(run) for run in invalid_runs)
+            + ":\n"
+            + json.dumps(results, indent=2, sort_keys=True)
+        )
     if baseline["state"] != "HEALTHY":
         raise SystemExit(
             "replay was deterministic but input health was not HEALTHY:\n"
             + json.dumps(baseline, indent=2, sort_keys=True)
         )
     output = json.dumps(
-        {"repeat_count": options.repeat, "health": baseline},
+        {
+            "repeat_count": options.repeat,
+            "health": baseline,
+            "runs": [
+                {
+                    "transitions": result["transitions"],
+                    "timing_ranges_ms": result["timing_ranges_ms"],
+                }
+                for result in results
+            ],
+        },
         indent=2,
         sort_keys=True,
     )

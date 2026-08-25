@@ -122,6 +122,7 @@ class InputContractTests(unittest.TestCase):
                 step=640 * 2,
                 encoding="16UC1",
                 data_size=640 * 360 * 2,
+                processing_complete_time_ns=16_000_000,
             ),
         )
         monitor.observe_camera_info(
@@ -147,6 +148,7 @@ class InputContractTests(unittest.TestCase):
         self.assertEqual(depth.profile, "640x360")
         self.assertEqual(depth.encoding, "16UC1")
         self.assertEqual(depth.frame_id, "camera_1_color_optical_frame")
+        self.assertEqual(depth.processing_latency_ms, 6.0)
         self.assertTrue(snapshot.camera_info_consistency["depth"])
 
     def test_invalid_dimensions_stride_encoding_and_camera_info_are_invalid(
@@ -268,6 +270,7 @@ class InputContractTests(unittest.TestCase):
             ),
         )
         monitor.record_queue_drops(Stream.COLOR_IMAGE, 2)
+        monitor.record_transport_drops(Stream.COLOR_IMAGE, 1)
 
         snapshot = monitor.snapshot(
             sensor_now_ns=1_300_000_000,
@@ -279,6 +282,9 @@ class InputContractTests(unittest.TestCase):
         self.assertIn(Stream.COLOR_IMAGE, snapshot.stale_sensor_streams)
         self.assertIn(Stream.COLOR_IMAGE, snapshot.stale_receive_streams)
         self.assertEqual(snapshot.streams[Stream.COLOR_IMAGE].queue_drops, 2)
+        self.assertEqual(
+            snapshot.streams[Stream.COLOR_IMAGE].transport_drops, 1
+        )
         self.assertNotIn(Stream.COLOR_IMAGE, snapshot.missing_streams)
 
     def test_all_required_independent_streams_can_be_healthy(self) -> None:

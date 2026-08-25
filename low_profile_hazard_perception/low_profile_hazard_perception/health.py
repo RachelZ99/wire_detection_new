@@ -12,6 +12,8 @@ from enum import Enum
 from math import isfinite, sqrt
 from typing import Any
 
+from .replay_result import is_timing_field
+
 
 class Stream(str, Enum):
     COLOR_IMAGE = "color_image"
@@ -39,6 +41,7 @@ class ImageObservation:
     step: int
     encoding: str
     data_size: int
+    processing_complete_time_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,7 @@ class CameraInfoObservation:
     fy: float
     cx: float
     cy: float
+    processing_complete_time_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,7 @@ class OdomObservation:
     receive_time_ns: int
     frame_id: str
     child_frame_id: str
+    processing_complete_time_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,43 @@ class TransformBatchObservation:
     receive_time_ns: int
     transforms: tuple[Transform, ...]
     required_chain_available: bool
+    input_error: str = ""
+    processing_complete_time_ns: int | None = None
+
+
+def validate_transform_batch(
+    stream: Stream, observation: TransformBatchObservation
+) -> str:
+    """Validate a TF batch before an adapter gives it to tf2."""
+    if stream not in (Stream.TF, Stream.TF_STATIC):
+        return f"{stream.value} is not a TF stream"
+    if observation.input_error:
+        return observation.input_error
+    if observation.sensor_stamp_ns <= 0 and stream is Stream.TF:
+        return "sensor stamp must be positive"
+    if not observation.transforms:
+        return "TF message has no transforms"
+    for transform in observation.transforms:
+        reason = _validate_transform(transform)
+        if reason:
+            return reason
+    return ""
+
+
+def _validate_transform(transform: Transform) -> str:
+    if not transform.parent_frame_id or not transform.child_frame_id:
+        return "TF parent and child frame IDs are required"
+    if transform.parent_frame_id == transform.child_frame_id:
+        return "TF parent and child frame IDs must differ"
+    values = (*transform.translation, *transform.rotation)
+    if not all(isfinite(value) for value in values):
+        return "TF contains a non-finite value"
+    norm = sqrt(sum(value * value for value in transform.rotation))
+    if norm < 1e-6:
+        return "TF rotation quaternion has zero norm"
+    if abs(norm - 1.0) > 1e-3:
+        return f"TF rotation quaternion norm is {norm:.6f}, expected 1"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -84,8 +126,10 @@ class StreamHealth:
     valid_count: int
     invalid_count: int
     queue_drops: int
+    transport_drops: int
     sensor_stamp_age_ms: float | None
     receive_age_ms: float | None
+    processing_latency_ms: float | None
     approximate_rate_hz: float | None
     frame_id: str
     profile: str
@@ -114,7 +158,7 @@ class HealthSnapshot:
                 stream.value: {
                     key: value
                     for key, value in asdict(health).items()
-                    if key != "receive_age_ms"
+                    if not is_timing_field(key)
                 }
                 for stream, health in sorted(
                     self.streams.items(), key=lambda item: item[0].value
@@ -143,6 +187,7 @@ class _StreamRecord:
     valid_count: int = 0
     invalid_count: int = 0
     queue_drops: int = 0
+    transport_drops: int = 0
     first_sensor_stamp_ns: int | None = None
     last_sensor_stamp_ns: int | None = None
     last_receive_time_ns: int | None = None
@@ -152,6 +197,7 @@ class _StreamRecord:
     encoding: str = ""
     valid: bool = False
     reason: str = "missing"
+    processing_latency_ms: float | None = None
     observation: ImageObservation | CameraInfoObservation | None = None
 
 
@@ -265,6 +311,9 @@ class HealthMonitor:
             Stream.ODOM,
             sensor_stamp_ns=observation.sensor_stamp_ns,
             receive_time_ns=observation.receive_time_ns,
+            processing_complete_time_ns=(
+                observation.processing_complete_time_ns
+            ),
             frame_id=f"{observation.frame_id}->{observation.child_frame_id}",
             reason=reason,
         )
@@ -274,16 +323,7 @@ class HealthMonitor:
     ) -> None:
         if stream not in (Stream.TF, Stream.TF_STATIC):
             raise ValueError(f"{stream.value} is not a TF stream")
-        reason = ""
-        if observation.sensor_stamp_ns <= 0 and stream is Stream.TF:
-            reason = "sensor stamp must be positive"
-        elif not observation.transforms:
-            reason = "TF message has no transforms"
-        else:
-            for transform in observation.transforms:
-                reason = self._validate_transform(transform)
-                if reason:
-                    break
+        reason = validate_transform_batch(stream, observation)
         self._tf_chain_available = observation.required_chain_available
         frame_id = ",".join(
             f"{transform.parent_frame_id}->{transform.child_frame_id}"
@@ -293,6 +333,9 @@ class HealthMonitor:
             stream,
             sensor_stamp_ns=observation.sensor_stamp_ns,
             receive_time_ns=observation.receive_time_ns,
+            processing_complete_time_ns=(
+                observation.processing_complete_time_ns
+            ),
             frame_id=frame_id,
             reason=reason,
         )
@@ -331,8 +374,10 @@ class HealthMonitor:
                 valid_count=record.valid_count,
                 invalid_count=record.invalid_count,
                 queue_drops=record.queue_drops,
+                transport_drops=record.transport_drops,
                 sensor_stamp_age_ms=sensor_age,
                 receive_age_ms=receive_age,
+                processing_latency_ms=record.processing_latency_ms,
                 approximate_rate_hz=rate,
                 frame_id=record.frame_id,
                 profile=profile,
@@ -386,6 +431,9 @@ class HealthMonitor:
             tf_inputs_received and self._tf_chain_available is False
         )
         queue_drops = sum(health.queue_drops for health in streams.values())
+        transport_drops = sum(
+            health.transport_drops for health in streams.values()
+        )
         reasons = tuple(
             [*(f"invalid:{stream.value}" for stream in invalid)]
             + [
@@ -399,10 +447,21 @@ class HealthMonitor:
             + [*(f"sensor_stale:{stream.value}" for stream in stale_sensor)]
             + [*(f"receive_stale:{stream.value}" for stream in stale_receive)]
             + ([f"queue_drops:{queue_drops}"] if queue_drops else [])
+            + (
+                [f"transport_drops:{transport_drops}"]
+                if transport_drops
+                else []
+            )
         )
         if invalid or inconsistent_camera_info or tf_chain_invalid:
             state = HealthState.INVALID
-        elif missing or stale_sensor or stale_receive or queue_drops:
+        elif (
+            missing
+            or stale_sensor
+            or stale_receive
+            or queue_drops
+            or transport_drops
+        ):
             state = HealthState.DEGRADED
         else:
             state = HealthState.HEALTHY
@@ -422,6 +481,24 @@ class HealthMonitor:
         if count < 0:
             raise ValueError("queue drop count cannot be negative")
         self._records[stream].queue_drops += count
+
+    def record_transport_drops(self, stream: Stream, count: int) -> None:
+        if count < 0:
+            raise ValueError("transport drop count cannot be negative")
+        self._records[stream].transport_drops += count
+
+    def record_processing_complete(
+        self,
+        stream: Stream,
+        *,
+        receive_time_ns: int,
+        processing_complete_time_ns: int,
+    ) -> None:
+        if processing_complete_time_ns < receive_time_ns:
+            raise ValueError("processing completion precedes receive time")
+        self._records[stream].processing_latency_ms = (
+            processing_complete_time_ns - receive_time_ns
+        ) / 1_000_000
 
     @staticmethod
     def _age_ms(now_ns: int, then_ns: int | None) -> float | None:
@@ -448,16 +525,16 @@ class HealthMonitor:
         reason: str,
     ) -> None:
         record = self._records[stream]
-        record.delivered_count += 1
-        record.valid = not reason
-        record.reason = reason or "valid"
-        record.valid_count += int(not reason)
-        record.invalid_count += int(bool(reason))
-        if record.first_sensor_stamp_ns is None:
-            record.first_sensor_stamp_ns = observation.sensor_stamp_ns
-        record.last_sensor_stamp_ns = observation.sensor_stamp_ns
-        record.last_receive_time_ns = observation.receive_time_ns
-        record.frame_id = observation.frame_id
+        self._record_delivery(
+            record,
+            sensor_stamp_ns=observation.sensor_stamp_ns,
+            receive_time_ns=observation.receive_time_ns,
+            processing_complete_time_ns=(
+                observation.processing_complete_time_ns
+            ),
+            frame_id=observation.frame_id,
+            reason=reason,
+        )
         record.width = observation.width
         record.height = observation.height
         record.encoding = getattr(observation, "encoding", "")
@@ -469,10 +546,30 @@ class HealthMonitor:
         *,
         sensor_stamp_ns: int,
         receive_time_ns: int,
+        processing_complete_time_ns: int | None,
         frame_id: str,
         reason: str,
     ) -> None:
         record = self._records[stream]
+        self._record_delivery(
+            record,
+            sensor_stamp_ns=sensor_stamp_ns,
+            receive_time_ns=receive_time_ns,
+            processing_complete_time_ns=processing_complete_time_ns,
+            frame_id=frame_id,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _record_delivery(
+        record: _StreamRecord,
+        *,
+        sensor_stamp_ns: int,
+        receive_time_ns: int,
+        processing_complete_time_ns: int | None,
+        frame_id: str,
+        reason: str,
+    ) -> None:
         record.delivered_count += 1
         record.valid = not reason
         record.reason = reason or "valid"
@@ -483,22 +580,10 @@ class HealthMonitor:
         record.last_sensor_stamp_ns = sensor_stamp_ns
         record.last_receive_time_ns = receive_time_ns
         record.frame_id = frame_id
-
-    @staticmethod
-    def _validate_transform(transform: Transform) -> str:
-        if not transform.parent_frame_id or not transform.child_frame_id:
-            return "TF parent and child frame IDs are required"
-        if transform.parent_frame_id == transform.child_frame_id:
-            return "TF parent and child frame IDs must differ"
-        values = (*transform.translation, *transform.rotation)
-        if not all(isfinite(value) for value in values):
-            return "TF contains a non-finite value"
-        norm = sqrt(sum(value * value for value in transform.rotation))
-        if norm < 1e-6:
-            return "TF rotation quaternion has zero norm"
-        if abs(norm - 1.0) > 1e-3:
-            return f"TF rotation quaternion norm is {norm:.6f}, expected 1"
-        return ""
+        if processing_complete_time_ns is not None:
+            record.processing_latency_ms = (
+                processing_complete_time_ns - receive_time_ns
+            ) / 1_000_000
 
     def _camera_info_consistent(
         self, image_stream: Stream, info_stream: Stream
