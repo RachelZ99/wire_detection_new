@@ -54,6 +54,13 @@ class RgbCablePipelineResult:
     degradation_reason: str = ""
 
 
+@dataclass(frozen=True)
+class ObservedFloorSnapshot:
+    sensor_stamp_ns: int
+    estimate: GroundEstimate
+    region: ObservedFloorRegion
+
+
 class GeometricHazardPipeline:
     """Own the explicitly asynchronous geometry/alignment/confirmation path."""
 
@@ -76,9 +83,7 @@ class GeometricHazardPipeline:
         self.nominal_camera_height_m = 0.0
         self._last_aligned_observation_stamp_ns: int | None = None
         self._last_aligned_rgb_stamp_ns: int | None = None
-        self._latest_floor: tuple[
-            int, GroundEstimate, ObservedFloorRegion
-        ] | None = None
+        self._latest_floor: ObservedFloorSnapshot | None = None
         self._pending_alignment_reason = ""
         self._confirmed_expiry_suspended = False
 
@@ -185,10 +190,10 @@ class GeometricHazardPipeline:
         observed_base_from_camera = self.base_from_camera.with_observed_ground(
             ground.model.normal, ground.model.camera_height_m
         )
-        self._latest_floor = (
-            sensor_stamp_ns,
-            ground,
-            ObservedFloorRegion.from_depth(
+        self._latest_floor = ObservedFloorSnapshot(
+            sensor_stamp_ns=sensor_stamp_ns,
+            estimate=ground,
+            region=ObservedFloorRegion.from_depth(
                 depth_values,
                 self.intrinsics,
                 ground.model,
@@ -202,33 +207,21 @@ class GeometricHazardPipeline:
             ground.model,
             depth_unit_m=depth_unit_m,
         )
-        confirmed: list[ConfirmedHazard] = []
-        reconfirmation_required = self._confirmed_expiry_suspended
-        for candidate in candidates:
-            points_odom = tuple(
-                odom_from_camera.transform_point(point)
-                for point in candidate.points
-            )
-            confirmed.extend(
-                self.tracker.observe(
-                    HazardObservation(
-                        sensor_stamp_ns=sensor_stamp_ns,
-                        points_odom=points_odom,
-                        evidence=EvidenceSource.STRONG_GEOMETRY,
-                        confidence=candidate.confidence,
+        confirmed, degradation_reason = self._track_observations(
+            tuple(
+                HazardObservation(
+                    sensor_stamp_ns=sensor_stamp_ns,
+                    points_odom=tuple(
+                        odom_from_camera.transform_point(point)
+                        for point in candidate.points
                     ),
-                    allow_confirmed_expiry=(
-                        not self._confirmed_expiry_suspended
-                    ),
-                    require_reconfirmation_for_confirmed=(
-                        reconfirmation_required
-                    ),
+                    evidence=EvidenceSource.STRONG_GEOMETRY,
+                    confidence=candidate.confidence,
                 )
-            )
-        if confirmed and not degradation_reason:
-            self._confirmed_expiry_suspended = False
-        elif reconfirmation_required and not degradation_reason:
-            degradation_reason = "recovery:reconfirmation_required"
+                for candidate in candidates
+            ),
+            degradation_reason=degradation_reason,
+        )
         return GeometricPipelineResult(
             sensor_stamp_ns=sensor_stamp_ns,
             ground=ground,
@@ -275,15 +268,15 @@ class GeometricHazardPipeline:
             self._suspend_confirmation()
             degradation_reason = "odom:discontinuous"
         self._last_aligned_rgb_stamp_ns = sensor_stamp_ns
-        ground_stamp_ns, ground, floor_region = self._latest_floor
+        floor = self._latest_floor
         if (
-            abs(sensor_stamp_ns - ground_stamp_ns)
+            abs(sensor_stamp_ns - floor.sensor_stamp_ns)
             > self.cable_detector.config.maximum_ground_age_ns
         ):
             self._suspend_confirmation()
             return RgbCablePipelineResult(
                 sensor_stamp_ns=sensor_stamp_ns,
-                ground_sensor_stamp_ns=ground_stamp_ns,
+                ground_sensor_stamp_ns=floor.sensor_stamp_ns,
                 candidates=(),
                 confirmed=(),
                 retained=self.tracker.retained_at(
@@ -295,28 +288,56 @@ class GeometricHazardPipeline:
         candidates = self.cable_detector.detect(
             rgb_values,
             self.rgb_intrinsics,
-            ground.model,
-            floor_region,
+            floor.estimate.model,
+            floor.region,
         )
         observed_base_from_camera = self.base_from_camera.with_observed_ground(
-            ground.model.normal,
-            ground.model.camera_height_m,
+            floor.estimate.model.normal,
+            floor.estimate.model.camera_height_m,
         )
         odom_from_camera = alignment.pose.compose(observed_base_from_camera)
-        confirmed: list[ConfirmedHazard] = []
+        confirmed, degradation_reason = self._track_observations(
+            tuple(
+                HazardObservation(
+                    sensor_stamp_ns=sensor_stamp_ns,
+                    points_odom=tuple(
+                        odom_from_camera.transform_point(point)
+                        for point in candidate.points_camera
+                    ),
+                    evidence=EvidenceSource.RGB_CABLE,
+                    confidence=candidate.confidence,
+                )
+                for candidate in candidates
+            ),
+            degradation_reason=degradation_reason,
+        )
+        return RgbCablePipelineResult(
+            sensor_stamp_ns=sensor_stamp_ns,
+            ground_sensor_stamp_ns=floor.sensor_stamp_ns,
+            candidates=candidates,
+            confirmed=tuple(confirmed),
+            retained=self.tracker.retained_at(
+                sensor_stamp_ns,
+                allow_confirmed_expiry=(
+                    not self._confirmed_expiry_suspended
+                ),
+            ),
+            degradation_reason=degradation_reason,
+        )
+
+    def _track_observations(
+        self,
+        observations: tuple[HazardObservation, ...],
+        *,
+        degradation_reason: str,
+    ) -> tuple[tuple[ConfirmedHazard, ...], str]:
+        """Apply one shared confirmation/recovery lifecycle to all evidence."""
         reconfirmation_required = self._confirmed_expiry_suspended
-        for candidate in candidates:
+        confirmed: list[ConfirmedHazard] = []
+        for observation in observations:
             confirmed.extend(
                 self.tracker.observe(
-                    HazardObservation(
-                        sensor_stamp_ns=sensor_stamp_ns,
-                        points_odom=tuple(
-                            odom_from_camera.transform_point(point)
-                            for point in candidate.points_camera
-                        ),
-                        evidence=EvidenceSource.RGB_CABLE,
-                        confidence=candidate.confidence,
-                    ),
+                    observation,
                     allow_confirmed_expiry=(
                         not self._confirmed_expiry_suspended
                     ),
@@ -329,19 +350,7 @@ class GeometricHazardPipeline:
             self._confirmed_expiry_suspended = False
         elif reconfirmation_required and not degradation_reason:
             degradation_reason = "recovery:reconfirmation_required"
-        return RgbCablePipelineResult(
-            sensor_stamp_ns=sensor_stamp_ns,
-            ground_sensor_stamp_ns=ground_stamp_ns,
-            candidates=candidates,
-            confirmed=tuple(confirmed),
-            retained=self.tracker.retained_at(
-                sensor_stamp_ns,
-                allow_confirmed_expiry=(
-                    not self._confirmed_expiry_suspended
-                ),
-            ),
-            degradation_reason=degradation_reason,
-        )
+        return tuple(confirmed), degradation_reason
 
     def diagnostic_pink_count(
         self,
@@ -354,6 +363,6 @@ class GeometricHazardPipeline:
         return diagnostic_pink_pixel_count(
             rgb_values,
             self.rgb_intrinsics,
-            self._latest_floor[2],
+            self._latest_floor.region,
             config,
         )

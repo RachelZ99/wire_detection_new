@@ -46,6 +46,8 @@ geometric_hazard:
     cable_minimum_length_px: 16.0
     cable_minimum_apparent_width_px: 1.5
     cable_maximum_apparent_width_px: 6.0
+    cable_minimum_width_consistency: 0.55
+    cable_minimum_curve_continuity: 0.80
     cable_minimum_physical_span_m: 0.06
     cable_maximum_ground_age_ms: 500.0
 

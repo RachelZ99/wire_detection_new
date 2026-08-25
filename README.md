@@ -96,6 +96,21 @@ points with bounded confirmation spread and physical span in the operational
 `odom` cloud. It explicitly rejects the diagnostic pink comparison as an
 operational provider.
 
+Named negative scenes are listed in
+`low_profile_hazard_perception/config/cable_negative_replay_manifest.yaml`.
+For each external scene bag, pass its measured odom annotation, for example:
+
+```bash
+ros2 run low_profile_hazard_perception replay_rgb_cable \
+  /path/to/long_shadow_scene --repeat 2 \
+  --negative-only \
+  --negative-cable-region long_shadow MIN_X MAX_X MIN_Y MAX_Y
+```
+
+The repository contains no ROS bags for these scenes, so real-scene replay
+results cannot be claimed from this checkout; the synthetic fixtures exercise
+the same category gates deterministically.
+
 The geometric replay additionally requires at least one non-empty, meaningfully stamped
 `odom` point cloud, deterministic point bytes and timestamps across runs, and
 an observed camera-to-floor distance in the measured 0.20–0.25 m range. The

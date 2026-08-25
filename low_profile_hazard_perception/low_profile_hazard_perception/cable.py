@@ -60,16 +60,32 @@ class ObservedFloorRegion:
             for cell, count in floor_counts.items()
             if count >= 2 and blocked_counts.get(cell, 0) < 2
         }
-        # One-cell support growth bridges the narrow invalid-depth stripe that
-        # a 2--5 px cable can create. Cells with observed raised structure stay
-        # excluded, which keeps background and hanging structure off the floor.
+        # Bridge only a one-cell hole enclosed by observed floor on opposing
+        # sides. This preserves a narrow invalid-depth cable stripe without
+        # growing the ROI into unobserved background or beside hanging objects.
         supported: set[tuple[int, int]] = set(directly_supported)
-        for column, row in directly_supported:
-            for delta_column in (-1, 0, 1):
-                for delta_row in (-1, 0, 1):
-                    neighbor = (column + delta_column, row + delta_row)
-                    if blocked_counts.get(neighbor, 0) < 2:
-                        supported.add(neighbor)
+        bridge_candidates = {
+            (column + delta_column, row + delta_row)
+            for column, row in directly_supported
+            for delta_column in (-1, 0, 1)
+            for delta_row in (-1, 0, 1)
+        }
+        opposing_pairs = (
+            ((-1, 0), (1, 0)),
+            ((0, -1), (0, 1)),
+            ((-1, -1), (1, 1)),
+            ((-1, 1), (1, -1)),
+        )
+        for column, row in bridge_candidates:
+            if blocked_counts.get((column, row), 0) >= 2:
+                continue
+            if any(
+                (column + first[0], row + first[1]) in directly_supported
+                and (column + second[0], row + second[1])
+                in directly_supported
+                for first, second in opposing_pairs
+            ):
+                supported.add((column, row))
         return cls(
             width=intrinsics.width,
             height=intrinsics.height,
@@ -137,6 +153,8 @@ class TrainingFreeCableConfig:
     minimum_length_px: float = 16.0
     minimum_apparent_width_px: float = 1.5
     maximum_apparent_width_px: float = 6.0
+    minimum_width_consistency: float = 0.55
+    minimum_curve_continuity: float = 0.80
     minimum_physical_span_m: float = 0.06
     maximum_ground_age_ns: int = 500_000_000
     minimum_depth_m: float = 0.20
@@ -154,6 +172,10 @@ class TrainingFreeCableConfig:
             raise ValueError("minimum_length_px must be positive")
         if not 0.0 < self.minimum_apparent_width_px < self.maximum_apparent_width_px:
             raise ValueError("apparent cable width range is invalid")
+        if not 0.0 <= self.minimum_width_consistency <= 1.0:
+            raise ValueError("minimum_width_consistency must be in [0, 1]")
+        if not 0.0 <= self.minimum_curve_continuity <= 1.0:
+            raise ValueError("minimum_curve_continuity must be in [0, 1]")
         if self.minimum_physical_span_m <= 0.0:
             raise ValueError("minimum_physical_span_m must be positive")
         if self.maximum_ground_age_ns <= 0:
@@ -298,6 +320,11 @@ class TrainingFreeCableDetector:
             / max(float(self.config.maximum_half_width_px * 2), 1.0),
         )
         continuity = min(1.0, len(component) / max(pixel_span, 1.0))
+        if (
+            width_consistency < self.config.minimum_width_consistency
+            or continuity < self.config.minimum_curve_continuity
+        ):
+            return None
         ordered_pixels = tuple(sorted(component, key=lambda pixel: (pixel[1], pixel[0])))
         projected = [
             (pixel, ground.intersect_pixel_ray(

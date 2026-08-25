@@ -41,6 +41,7 @@ from .health import (
 from .node import InputHealthNode, _stamp_ns
 from .temporal import (
     ConfirmedHazard,
+    EvidenceMask,
     EvidenceSource,
     HazardTrackerConfig,
     Pose3,
@@ -200,6 +201,16 @@ class GeometricHazardNode(InputHealthNode):
             maximum_apparent_width_px=float(
                 self.declare_parameter(
                     "cable_maximum_apparent_width_px", 6.0
+                ).value
+            ),
+            minimum_width_consistency=float(
+                self.declare_parameter(
+                    "cable_minimum_width_consistency", 0.55
+                ).value
+            ),
+            minimum_curve_continuity=float(
+                self.declare_parameter(
+                    "cable_minimum_curve_continuity", 0.80
                 ).value
             ),
             minimum_physical_span_m=float(
@@ -752,7 +763,7 @@ def _point_cloud(
             point,
             hazard.spatial_spread_m,
             divmod(hazard.sensor_stamp_ns, 1_000_000_000),
-            _evidence_mask(hazard),
+            int(EvidenceMask.from_sources(hazard.evidence)),
         )
         for hazard in retained
         for point in hazard.points_odom
@@ -804,17 +815,6 @@ def _point_cloud(
     )
     cloud.is_dense = True
     return cloud
-
-
-def _evidence_mask(hazard: ConfirmedHazard) -> int:
-    mask = 0
-    if EvidenceSource.STRONG_GEOMETRY in hazard.evidence:
-        mask |= 1
-    if EvidenceSource.RGB_CABLE in hazard.evidence:
-        mask |= 2
-    return mask
-
-
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     node = GeometricHazardNode()

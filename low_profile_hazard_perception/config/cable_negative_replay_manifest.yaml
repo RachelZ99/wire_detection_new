@@ -1,0 +1,18 @@
+schema_version: 1
+phase: home_feasibility
+artifact_policy: external_rosbag_with_odom_annotation
+
+# Each label is accepted by replay_rgb_cable --negative-cable-region. The
+# repository supplies deterministic synthetic coverage for every class; real
+# scene bags and their measured odom regions remain external test artifacts.
+required_scenes:
+  - label: empty_reflective_floor
+    description: Empty reflective floor without a physical cable.
+  - label: long_shadow
+    description: Long cast shadow crossing the observed floor.
+  - label: floor_seam
+    description: Thin floor seam or joint inside the floor ROI.
+  - label: table_or_tripod_leg
+    description: Raised narrow furniture structure over visible floor.
+  - label: cable_reflection
+    description: Cable-like reflection without cable occupancy at that region.

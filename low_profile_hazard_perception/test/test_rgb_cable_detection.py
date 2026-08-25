@@ -68,6 +68,36 @@ def _rgb_line(
 
 
 class TrainingFreeRgbCableTests(unittest.TestCase):
+    def test_inconsistent_width_is_rejected_instead_of_only_downscored(
+        self,
+    ) -> None:
+        depth, intrinsics, ground = _floor_scene()
+        floor = ObservedFloorRegion.from_depth(
+            depth,
+            intrinsics,
+            ground,
+            depth_unit_m=0.001,
+        )
+        data = bytearray((82, 86, 88) * (intrinsics.width * intrinsics.height))
+        for row in range(48, 69):
+            width_px = 2 if row < 58 else 6
+            first_column = 60 - width_px // 2
+            for column in range(first_column, first_column + width_px):
+                offset = (row * intrinsics.width + column) * 3
+                data[offset : offset + 3] = bytes((235, 235, 235))
+
+        candidates = TrainingFreeCableDetector(
+            TrainingFreeCableConfig(
+                minimum_component_pixels=12,
+                minimum_length_px=12.0,
+                minimum_physical_span_m=0.04,
+                minimum_width_consistency=0.55,
+                minimum_curve_continuity=0.80,
+            )
+        ).detect(bytes(data), intrinsics, ground, floor)
+
+        self.assertEqual(candidates, ())
+
     def test_color_specific_demo_is_only_a_diagnostic_comparison(self) -> None:
         depth, intrinsics, ground = _floor_scene()
         floor = ObservedFloorRegion.from_depth(
@@ -129,8 +159,20 @@ class TrainingFreeRgbCableTests(unittest.TestCase):
         stripe(long_shadow, range(50, 66), range(48, 69), (75, 77, 79))
         cable_reflection = image()
         stripe(cable_reflection, range(60, 61), range(48, 69), (220, 220, 220))
+        background_structure = image()
+        stripe(
+            background_structure,
+            range(59, 62),
+            range(10, 32),
+            (235, 235, 235),
+        )
         hanging_wire = image()
-        stripe(hanging_wire, range(59, 62), range(10, 32), (235, 235, 235))
+        stripe(hanging_wire, range(38, 41), range(48, 69), (235, 235, 235))
+        hanging_depth = list(depth)
+        for row in range(48, 69):
+            for column in range(38, 41):
+                index = row * intrinsics.width + column
+                hanging_depth[index] = max(1, hanging_depth[index] - 180)
         tripod_leg = image()
         stripe(tripod_leg, range(58, 63), range(48, 69), (50, 50, 50))
         leg_depth = list(depth)
@@ -142,7 +184,11 @@ class TrainingFreeRgbCableTests(unittest.TestCase):
             "empty reflective floor": (empty_reflective_floor, depth),
             "long shadow": (long_shadow, depth),
             "cable reflection": (cable_reflection, depth),
-            "hanging wire/background": (hanging_wire, depth),
+            "background structure": (background_structure, depth),
+            "hanging wire over visible floor": (
+                hanging_wire,
+                hanging_depth,
+            ),
             "table/tripod leg": (tripod_leg, leg_depth),
         }
         detector = TrainingFreeCableDetector(

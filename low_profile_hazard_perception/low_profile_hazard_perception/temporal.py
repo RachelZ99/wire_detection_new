@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, IntFlag
 from math import acos, degrees, sin, sqrt
 
 from .geometry import Point3
@@ -255,6 +255,25 @@ class EvidenceSource(str, Enum):
     RGB_CABLE = "RGB_CABLE"
 
 
+class EvidenceMask(IntFlag):
+    """Stable PointCloud2 wire bits for operational evidence sources."""
+
+    NONE = 0
+    STRONG_GEOMETRY = 1
+    RGB_CABLE = 2
+
+    @classmethod
+    def from_sources(
+        cls, sources: tuple[EvidenceSource, ...]
+    ) -> "EvidenceMask":
+        mask = cls.NONE
+        if EvidenceSource.STRONG_GEOMETRY in sources:
+            mask |= cls.STRONG_GEOMETRY
+        if EvidenceSource.RGB_CABLE in sources:
+            mask |= cls.RGB_CABLE
+        return mask
+
+
 @dataclass(frozen=True)
 class HazardObservation:
     sensor_stamp_ns: int
@@ -385,6 +404,7 @@ class HazardTracker:
                 (self._distance(centroid, track.centroid), track)
                 for track in self._tracks
                 if track.confirmed
+                and observation.evidence in track.evidence
                 and self._distance(centroid, track.centroid)
                 <= self.config.association_radius_m
             ]
@@ -395,6 +415,7 @@ class HazardTracker:
             (self._distance(centroid, track.centroid), track)
             for track in self._tracks
             if track.last_stamp_ns < observation.sensor_stamp_ns
+            and observation.evidence in track.evidence
             and (
                 not track.confirmed
                 or not require_reconfirmation_for_confirmed

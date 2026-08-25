@@ -99,6 +99,43 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
 
         self.assertEqual(confirmed, ())
 
+    def test_geometry_and_rgb_do_not_cross_confirm_before_evidence_fusion(
+        self,
+    ) -> None:
+        tracker = HazardTracker()
+        point = ((0.8, 0.2, 0.03),)
+
+        geometry = tracker.observe(
+            HazardObservation(
+                sensor_stamp_ns=1_000_000_000,
+                points_odom=point,
+                evidence=EvidenceSource.STRONG_GEOMETRY,
+                confidence=0.9,
+            )
+        )
+        first_rgb = tracker.observe(
+            HazardObservation(
+                sensor_stamp_ns=1_100_000_000,
+                points_odom=point,
+                evidence=EvidenceSource.RGB_CABLE,
+                confidence=0.9,
+            )
+        )
+        second_rgb = tracker.observe(
+            HazardObservation(
+                sensor_stamp_ns=1_200_000_000,
+                points_odom=point,
+                evidence=EvidenceSource.RGB_CABLE,
+                confidence=0.9,
+            )
+        )
+
+        self.assertEqual(geometry, ())
+        self.assertEqual(first_rgb, ())
+        self.assertEqual(len(second_rgb), 1)
+        self.assertEqual(second_rgb[0].observation_count, 2)
+        self.assertEqual(second_rgb[0].evidence, (EvidenceSource.RGB_CABLE,))
+
     def test_confirmed_hazard_outlives_candidate_and_is_not_duplicated(
         self,
     ) -> None:

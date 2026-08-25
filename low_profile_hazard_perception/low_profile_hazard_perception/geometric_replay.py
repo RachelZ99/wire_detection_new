@@ -30,6 +30,7 @@ from .geometric_replay_audit import (
     observation_blind_zone_retention_audit,
 )
 from .replay_result import ReplayResultAccumulator
+from .temporal import EvidenceMask
 
 
 def _stamp_ns(message: object) -> int:
@@ -144,7 +145,7 @@ class _Collector(Node):
             for point, evidence_mask in zip(
                 points, evidence_masks, strict=True
             )
-            if evidence_mask & 2
+            if evidence_mask & int(EvidenceMask.RGB_CABLE)
         ]
         source_stamps_ns: list[int] = []
         if (
@@ -366,6 +367,21 @@ def _parse_args(
         "--minimum-cable-physical-span", type=float, default=0.06
     )
     parser.add_argument(
+        "--negative-cable-region",
+        nargs=5,
+        action="append",
+        metavar=("LABEL", "MIN_X", "MAX_X", "MIN_Y", "MAX_Y"),
+        help=(
+            "Reject persistent RGB-cable evidence in a named annotated odom "
+            "region; use labels from the negative replay manifest."
+        ),
+    )
+    parser.add_argument(
+        "--negative-only",
+        action="store_true",
+        help="Audit a cable-negative scene without requiring a positive event.",
+    )
+    parser.add_argument(
         "--reflective-floor-region",
         type=float,
         nargs=4,
@@ -393,6 +409,21 @@ def _parse_args(
         parser.error("--maximum-alignment-spread must be positive")
     if parsed.minimum_cable_physical_span <= 0.0:
         parser.error("--minimum-cable-physical-span must be positive")
+    try:
+        parsed.negative_cable_region = tuple(
+            (
+                values[0],
+                float(values[1]),
+                float(values[2]),
+                float(values[3]),
+                float(values[4]),
+            )
+            for values in parsed.negative_cable_region or ()
+        )
+    except ValueError:
+        parser.error("negative cable region bounds must be numeric")
+    if parsed.negative_only and not parsed.negative_cable_region:
+        parser.error("--negative-only requires --negative-cable-region")
     if not parsed.bag.exists():
         parser.error(f"bag does not exist: {parsed.bag}")
     return parsed
@@ -461,7 +492,8 @@ def _main(args: list[str] | None, *, evidence_mode: str) -> None:
             )
     clouds = baseline["clouds"]
     hazard_clouds = [cloud for cloud in clouds if not cloud["clearing"]]
-    if not hazard_clouds:
+    negative_only = evidence_mode == "rgb_cable" and options.negative_only
+    if not hazard_clouds and not negative_only:
         raise SystemExit("reference replay produced no confirmed hazard cloud")
     if any(
         cloud["frame_id"] != "odom"
@@ -558,6 +590,8 @@ def _main(args: list[str] | None, *, evidence_mode: str) -> None:
                     else None
                 ),
                 expected_center_radius_m=options.expected_cable_radius,
+                negative_regions=options.negative_cable_region,
+                require_positive=not negative_only,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise SystemExit(f"RGB cable replay audit failed: {error}") from error
@@ -571,35 +605,39 @@ def _main(args: list[str] | None, *, evidence_mode: str) -> None:
             "observed ground height is outside the measured installation "
             f"range: {measured_height:.3f} m"
         )
-    confirmation_spread = float(
-        values["geometry.latest_confirmation_spread_m"]
-    )
-    if confirmation_spread > options.maximum_alignment_spread:
-        raise SystemExit(
-            "confirmed observations exceeded the replay alignment spread: "
-            f"{confirmation_spread:.3f} m"
+    blind_zone_audit = None
+    if not negative_only:
+        confirmation_spread = float(
+            values["geometry.latest_confirmation_spread_m"]
         )
-    try:
-        audit_clouds = [
-            GeometricReplayCloud(
-                clearing=bool(cloud["clearing"]),
-                source_stamp_max_ns=cloud["source_stamp_max_ns"],
-                stamp_ns=int(cloud["stamp_ns"]),
+        if confirmation_spread > options.maximum_alignment_spread:
+            raise SystemExit(
+                "confirmed observations exceeded the replay alignment spread: "
+                f"{confirmation_spread:.3f} m"
             )
-            for cloud in clouds
-        ]
-        blind_zone_audit = observation_blind_zone_retention_audit(
-            audit_clouds,
-            latest_processed_depth_stamp_ns=int(
-                values["geometry.latest_processed_depth_stamp_ns"]
-            ),
-            minimum_retention_ns=int(
-                float(values["geometry.confirmed_retention_ms"])
-                * 1_000_000
-            ),
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise SystemExit(f"blind-zone retention audit failed: {error}") from error
+        try:
+            audit_clouds = [
+                GeometricReplayCloud(
+                    clearing=bool(cloud["clearing"]),
+                    source_stamp_max_ns=cloud["source_stamp_max_ns"],
+                    stamp_ns=int(cloud["stamp_ns"]),
+                )
+                for cloud in clouds
+            ]
+            blind_zone_audit = observation_blind_zone_retention_audit(
+                audit_clouds,
+                latest_processed_depth_stamp_ns=int(
+                    values["geometry.latest_processed_depth_stamp_ns"]
+                ),
+                minimum_retention_ns=int(
+                    float(values["geometry.confirmed_retention_ms"])
+                    * 1_000_000
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise SystemExit(
+                f"blind-zone retention audit failed: {error}"
+            ) from error
     output = json.dumps(
         {
             "repeat_count": options.repeat,
