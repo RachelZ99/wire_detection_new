@@ -488,6 +488,8 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
         assert "observation_stamp_sec" in field_names
         assert "observation_stamp_nanosec" in field_names
         assert "evidence_mask" in field_names
+        assert "confirmation_latency_ms" in field_names
+        assert "hazard_group_id" in field_names
         evidence_field = next(
             field for field in cloud.fields if field.name == "evidence_mask"
         )
@@ -515,6 +517,15 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
             "<f", bytes(cloud.data), spread_field.offset
         )[0]
         assert confirmation_spread < 0.025
+        latency_field = next(
+            field
+            for field in cloud.fields
+            if field.name == "confirmation_latency_ms"
+        )
+        confirmation_latency_ms = struct.unpack_from(
+            "<f", bytes(cloud.data), latency_field.offset
+        )[0]
+        assert 0.0 < confirmation_latency_ms <= 350.0
         points = [
             struct.unpack_from("<fff", bytes(cloud.data), offset)
             for offset in range(0, len(cloud.data), cloud.point_step)

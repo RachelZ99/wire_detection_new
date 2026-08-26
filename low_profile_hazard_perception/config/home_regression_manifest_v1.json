@@ -67,6 +67,14 @@
     "furniture_edge_cable_confusion",
     "mat_edge_cable_confusion"
   ],
+  "required_failure_injections": [
+    "rgb",
+    "depth",
+    "odom",
+    "tf",
+    "ground_model",
+    "npu"
+  ],
   "scenes": [
     {
       "scene_id": "tune-reference-pale-cable-power-strip",

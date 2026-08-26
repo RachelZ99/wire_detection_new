@@ -1071,8 +1071,10 @@ def _point_cloud(
             hazard.spatial_spread_m,
             divmod(hazard.sensor_stamp_ns, 1_000_000_000),
             int(EvidenceMask.from_sources(hazard.evidence)),
+            hazard.confirmation_latency_ns / 1_000_000,
+            hazard_group_id,
         )
-        for hazard in retained
+        for hazard_group_id, hazard in enumerate(retained)
         for point in hazard.points_odom
     )
     cloud.height = 1
@@ -1105,20 +1107,41 @@ def _point_cloud(
             datatype=PointField.UINT8,
             count=1,
         ),
+        PointField(
+            name="confirmation_latency_ms",
+            offset=28,
+            datatype=PointField.FLOAT32,
+            count=1,
+        ),
+        PointField(
+            name="hazard_group_id",
+            offset=32,
+            datatype=PointField.UINT32,
+            count=1,
+        ),
     ]
     cloud.is_bigendian = False
-    cloud.point_step = 28
+    cloud.point_step = 36
     cloud.row_step = cloud.point_step * cloud.width
     cloud.data = b"".join(
         struct.pack(
-            "<ffffiIB3x",
+            "<ffffiIB3xfI",
             *point,
             confirmation_spread_m,
             stamp_parts[0],
             stamp_parts[1],
             evidence_mask,
+            confirmation_latency_ms,
+            hazard_group_id,
         )
-        for point, confirmation_spread_m, stamp_parts, evidence_mask in points
+        for (
+            point,
+            confirmation_spread_m,
+            stamp_parts,
+            evidence_mask,
+            confirmation_latency_ms,
+            hazard_group_id,
+        ) in points
     )
     cloud.is_dense = True
     return cloud

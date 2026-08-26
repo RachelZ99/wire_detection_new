@@ -13,7 +13,7 @@ contains the complete, versioned held-out scene plan and executable event-level
 gate, but it contains none of the external home rosbag/result artifacts. In
 particular, the available experiment notes describe only the original scene at
 roughly 0.14 m/s; they do not provide the required independent 0.3 m/s straight
-and turning recordings.
+and turning recordings or the required stream/ground/NPU failure injections.
 
 The absence of evidence does not mean the rule path passes, and it does not
 identify a measured RGB failure class that would justify NPU work. Ticket 8

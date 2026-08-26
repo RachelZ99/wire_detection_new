@@ -21,7 +21,7 @@ setup(
         ),
         ("share/" + package_name + "/launch", glob("launch/*.launch.py")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["jsonschema", "setuptools"],
     zip_safe=True,
     maintainer="Low-profile perception maintainers",
     maintainer_email="maintainers@example.invalid",
@@ -43,6 +43,8 @@ setup(
             "low_profile_hazard_perception.profile_soak:main",
             "audit_home_regression = "
             "low_profile_hazard_perception.home_regression:main",
+            "run_home_regression = "
+            "low_profile_hazard_perception.home_regression_replay:main",
         ],
     },
 )

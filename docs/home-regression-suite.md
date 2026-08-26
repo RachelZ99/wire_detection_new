@@ -17,29 +17,50 @@ keeps tuning videos and held-out acceptance videos in different
   edges, and empty floor;
 - near/middle/far distances, three floor/lighting conditions, valid and
   cable-invalid depth, stationary motion, and 0.3 m/s straight and turning
-  recordings.
+  recordings;
+- injected RGB, depth, odom, TF, observed-ground-model, and optional-NPU
+  failures, each with an expected health state and a prohibition on unsupported
+  newly confirmed hazards.
 
-The bag files and their result JSON files are external evidence artifacts and
-are not invented or checked into this repository. Each result must conform to
+The bag files, odom annotations, and result JSON files are external evidence
+artifacts and are not invented or checked into this repository. Annotation
+files use `<scene_id>.json` and conform to
+`home_regression_scene_annotation_schema_v1.json`; results conform to
 `home_regression_scene_result_schema_v1.json` in the same config directory.
 In particular, a result records the bag SHA-256, two-pass determinism, actual
 evaluated duration, maximum speed observed from odom, per-event detection
 distance and confirmation latency, persistent false events, health failures,
-and worst resource use.
+health transitions, message age, fault-injection outcomes, and worst resource
+use.
 
 Event metrics come from the operational interface:
 
 - an event is detected only when an annotated hazard overlaps a confirmed,
   stamped `odom` point cloud;
 - confirmation latency is the interval between the first and confirming
-  independent source stamps, not callback time;
+  independent capture times; host receipt time is not substituted;
 - confirmed detection distance is robot-to-hazard distance at the confirming
   source stamp after odom interpolation;
 - one retained hazard is one event; republished frames do not increase recall;
 - a false event is a confirmed hazard in an annotated negative region, not a
   candidate mask pixel.
 
-Run the audit after placing one result file per manifest scene in a directory:
+Run the full black-box suite in ROS 2 Humble. For each available scene this
+command launches the asynchronous perception graph, replays the complete bag
+twice, captures health and confirmed `odom` clouds, matches them to the odom
+annotations, hashes the bag, writes a normalized scene result, and audits the
+gate:
+
+```bash
+ros2 run low_profile_hazard_perception run_home_regression \
+  --bags-directory /path/to/home-bags \
+  --annotations-directory /path/to/home-annotations \
+  --results-directory /path/to/home-regression-results \
+  --output home-regression-report.json \
+  --decision-record home-regression-npu-decision.md
+```
+
+To re-audit already captured, immutable results without replaying bags:
 
 ```bash
 ros2 run low_profile_hazard_perception audit_home_regression \
@@ -50,8 +71,8 @@ ros2 run low_profile_hazard_perception audit_home_regression \
 
 Pass a non-default manifest as the first positional argument. The command
 writes SHA-256 fingerprints for the manifest and every consumed result. Missing
-or mismatched results produce `EVIDENCE_INCOMPLETE`; they can never pass the
-rule path or select NPU work.
+or mismatched bags, annotations, or results produce `EVIDENCE_INCOMPLETE`; they
+can never pass the rule path or select NPU work.
 
 The terminal decisions are:
 

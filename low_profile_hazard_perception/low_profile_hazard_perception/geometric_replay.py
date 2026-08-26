@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import signal
 import struct
@@ -15,6 +16,7 @@ from typing import Any
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -30,7 +32,7 @@ from .geometric_replay_audit import (
     observation_blind_zone_retention_audit,
 )
 from .replay_result import ReplayResultAccumulator
-from .temporal import EvidenceMask
+from .temporal import EvidenceMask, OdomPoseCache, Pose3
 
 
 def _stamp_ns(message: object) -> int:
@@ -43,6 +45,14 @@ class _Collector(Node):
         self.latest_health: DiagnosticArray | None = None
         self._health: ReplayResultAccumulator | None = None
         self.clouds: list[dict[str, Any]] = []
+        self.maximum_observed_speed_mps = 0.0
+        self.maximum_pending_work = 0
+        self.maximum_processing_p95_ms: float | None = None
+        self.maximum_depth_cpu_cores: float | None = None
+        self.maximum_memory_growth_bytes: int | None = None
+        self._first_odom_stamp_ns: int | None = None
+        self._last_odom_stamp_ns: int | None = None
+        self._odom = self._new_odom_cache()
         health_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1000,
@@ -55,11 +65,25 @@ class _Collector(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        odom_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1000,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.create_subscription(
             DiagnosticArray, health_topic, self._collect_health, health_qos
         )
         self.create_subscription(
             PointCloud2, cloud_topic, self._collect_cloud, cloud_qos
+        )
+        self.create_subscription(Odometry, "/odom", self._collect_odom, odom_qos)
+
+    @staticmethod
+    def _new_odom_cache() -> OdomPoseCache:
+        return OdomPoseCache(
+            maximum_samples=100_000,
+            maximum_age_ns=3_600_000_000_000,
         )
 
     def _collect_health(self, message: DiagnosticArray) -> None:
@@ -69,9 +93,74 @@ class _Collector(Node):
         status = message.status[0]
         if self._health is None:
             self._health = ReplayResultAccumulator(diagnostic_name=status.name)
+        values = {item.key: item.value for item in status.values}
         self._health.record(
             state=status.message,
-            values={item.key: item.value for item in status.values},
+            values=values,
+        )
+        pending = [
+            int(float(value))
+            for key, value in values.items()
+            if key.endswith("pending_count") and value not in ("", "unknown")
+        ]
+        self.maximum_pending_work = max(
+            self.maximum_pending_work, max(pending, default=0)
+        )
+        self.maximum_processing_p95_ms = _maximum_optional(
+            self.maximum_processing_p95_ms,
+            values.get("stage.perception.processing_wall_p95_ms"),
+        )
+        self.maximum_depth_cpu_cores = _maximum_optional(
+            self.maximum_depth_cpu_cores,
+            values.get("stage.depth_geometry.average_cpu_cores"),
+        )
+        memory_growth = _maximum_optional(
+            (
+                float(self.maximum_memory_growth_bytes)
+                if self.maximum_memory_growth_bytes is not None
+                else None
+            ),
+            values.get("resource.memory_growth_bytes"),
+        )
+        self.maximum_memory_growth_bytes = (
+            max(0, int(memory_growth)) if memory_growth is not None else None
+        )
+
+    def _collect_odom(self, message: Odometry) -> None:
+        stamp_ns = _stamp_ns(message.header.stamp)
+        if stamp_ns <= 0:
+            return
+        pose = message.pose.pose
+        self._odom.add(
+            stamp_ns,
+            Pose3(
+                translation=(
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    float(pose.position.z),
+                ),
+                rotation=(
+                    float(pose.orientation.x),
+                    float(pose.orientation.y),
+                    float(pose.orientation.z),
+                    float(pose.orientation.w),
+                ),
+            ),
+        )
+        self._first_odom_stamp_ns = (
+            stamp_ns
+            if self._first_odom_stamp_ns is None
+            else min(self._first_odom_stamp_ns, stamp_ns)
+        )
+        self._last_odom_stamp_ns = (
+            stamp_ns
+            if self._last_odom_stamp_ns is None
+            else max(self._last_odom_stamp_ns, stamp_ns)
+        )
+        twist = message.twist.twist.linear
+        self.maximum_observed_speed_mps = max(
+            self.maximum_observed_speed_mps,
+            math.hypot(float(twist.x), float(twist.y)),
         )
 
     def _collect_cloud(self, message: PointCloud2) -> None:
@@ -107,24 +196,28 @@ class _Collector(Node):
             ),
             None,
         )
-        confirmation_spread_m = None
-        if spread_field is not None and message.data:
-            confirmation_spread_m = round(
-                max(
-                    struct.unpack_from(
-                        "<f",
-                        bytes(message.data),
-                        offset + spread_field.offset,
-                    )[0]
-                    for offset in range(
-                        0, len(message.data), int(message.point_step)
-                    )
-                ),
-                6,
-            )
+        latency_field = next(
+            (
+                field
+                for field in message.fields
+                if field.name == "confirmation_latency_ms"
+            ),
+            None,
+        )
+        group_field = next(
+            (
+                field
+                for field in message.fields
+                if field.name == "hazard_group_id"
+            ),
+            None,
+        )
+        offsets = list(
+            range(0, len(message.data), int(message.point_step))
+        )
         points = [
             struct.unpack_from("<fff", bytes(message.data), offset)
-            for offset in range(0, len(message.data), int(message.point_step))
+            for offset in offsets
         ]
         evidence_masks = (
             [
@@ -133,20 +226,41 @@ class _Collector(Node):
                     bytes(message.data),
                     offset + evidence_field.offset,
                 )[0]
-                for offset in range(
-                    0, len(message.data), int(message.point_step)
-                )
+                for offset in offsets
             ]
             if evidence_field is not None
             else [0] * len(points)
         )
-        rgb_cable_points = [
-            point
-            for point, evidence_mask in zip(
-                points, evidence_masks, strict=True
-            )
-            if evidence_mask & int(EvidenceMask.RGB_CABLE)
-        ]
+        confirmation_spreads = (
+            [
+                struct.unpack_from(
+                    "<f", bytes(message.data), offset + spread_field.offset
+                )[0]
+                for offset in offsets
+            ]
+            if spread_field is not None
+            else [None] * len(points)
+        )
+        confirmation_latencies_ms = (
+            [
+                struct.unpack_from(
+                    "<f", bytes(message.data), offset + latency_field.offset
+                )[0]
+                for offset in offsets
+            ]
+            if latency_field is not None
+            else [None] * len(points)
+        )
+        group_ids = (
+            [
+                struct.unpack_from(
+                    "<I", bytes(message.data), offset + group_field.offset
+                )[0]
+                for offset in offsets
+            ]
+            if group_field is not None
+            else [0] * len(points)
+        )
         source_stamps_ns: list[int] = []
         if (
             stamp_sec_field is not None
@@ -165,20 +279,41 @@ class _Collector(Node):
                     bytes(message.data),
                     offset + stamp_nanosec_field.offset,
                 )[0]
-                for offset in range(
-                    0, len(message.data), int(message.point_step)
-                )
+                for offset in offsets
             ]
-        x_values = [point[0] for point in points]
-        y_values = [point[1] for point in points]
-        z_values = sorted(point[2] for point in points)
-        horizontal_span_m = 0.0
-        if points:
-            horizontal_span_m = (
-                (max(x_values) - min(x_values)) ** 2
-                + (max(y_values) - min(y_values)) ** 2
-            ) ** 0.5
-        rgb_cable_span_m = _horizontal_span(rgb_cable_points)
+        metrics = _point_metrics(
+            points,
+            evidence_masks,
+            source_stamps_ns,
+            confirmation_spreads,
+            confirmation_latencies_ms,
+        )
+        hazard_groups = []
+        for group_id in sorted(set(group_ids)):
+            indices = [
+                index
+                for index, value in enumerate(group_ids)
+                if value == group_id
+            ]
+            hazard_groups.append(
+                {
+                    "hazard_group_id": group_id,
+                    **_point_metrics(
+                        [points[index] for index in indices],
+                        [evidence_masks[index] for index in indices],
+                        (
+                            [source_stamps_ns[index] for index in indices]
+                            if source_stamps_ns
+                            else []
+                        ),
+                        [confirmation_spreads[index] for index in indices],
+                        [
+                            confirmation_latencies_ms[index]
+                            for index in indices
+                        ],
+                    ),
+                }
+            )
         self.clouds.append(
             {
                 "stamp_ns": _stamp_ns(message.header.stamp),
@@ -186,46 +321,8 @@ class _Collector(Node):
                 "point_count": int(message.width) * int(message.height),
                 "point_step": int(message.point_step),
                 "data_sha256": hashlib.sha256(bytes(message.data)).hexdigest(),
-                "p20_height_m": _percentile(z_values, 0.20),
-                "p90_height_m": _percentile(z_values, 0.90),
-                "horizontal_span_m": round(horizontal_span_m, 6),
-                "centroid_x_m": (
-                    round(sum(x_values) / len(x_values), 6)
-                    if x_values
-                    else None
-                ),
-                "centroid_y_m": (
-                    round(sum(y_values) / len(y_values), 6)
-                    if y_values
-                    else None
-                ),
-                "confirmation_spread_m": confirmation_spread_m,
-                "rgb_cable_point_count": len(rgb_cable_points),
-                "rgb_cable_span_m": round(rgb_cable_span_m, 6),
-                "rgb_cable_centroid_x_m": (
-                    round(
-                        sum(point[0] for point in rgb_cable_points)
-                        / len(rgb_cable_points),
-                        6,
-                    )
-                    if rgb_cable_points
-                    else None
-                ),
-                "rgb_cable_centroid_y_m": (
-                    round(
-                        sum(point[1] for point in rgb_cable_points)
-                        / len(rgb_cable_points),
-                        6,
-                    )
-                    if rgb_cable_points
-                    else None
-                ),
-                "source_stamp_min_ns": (
-                    min(source_stamps_ns) if source_stamps_ns else None
-                ),
-                "source_stamp_max_ns": (
-                    max(source_stamps_ns) if source_stamps_ns else None
-                ),
+                **metrics,
+                "hazard_groups": hazard_groups,
                 "clearing": not points,
             }
         )
@@ -234,11 +331,141 @@ class _Collector(Node):
         self.latest_health = None
         self._health = None
         self.clouds = []
+        self.maximum_observed_speed_mps = 0.0
+        self.maximum_pending_work = 0
+        self.maximum_processing_p95_ms = None
+        self.maximum_depth_cpu_cores = None
+        self.maximum_memory_growth_bytes = None
+        self._first_odom_stamp_ns = None
+        self._last_odom_stamp_ns = None
+        self._odom = self._new_odom_cache()
 
     def report(self) -> dict[str, Any]:
         if self._health is None:
             raise RuntimeError("replay produced no perception-health output")
-        return {"health": self._health.report(), "clouds": self.clouds}
+        health = self._health.report()
+        clouds = [self._with_detection_distance(cloud) for cloud in self.clouds]
+        duration_seconds = None
+        if (
+            self._first_odom_stamp_ns is not None
+            and self._last_odom_stamp_ns is not None
+        ):
+            duration_seconds = (
+                self._last_odom_stamp_ns - self._first_odom_stamp_ns
+            ) / 1_000_000_000
+        return {
+            "health": health,
+            "clouds": clouds,
+            "runtime": {
+                "evaluated_duration_seconds": duration_seconds,
+                "observed_maximum_speed_mps": round(
+                    self.maximum_observed_speed_mps, 6
+                ),
+                "resource_use": {
+                    "processing_p95_ms": self.maximum_processing_p95_ms,
+                    "depth_geometry_average_cpu_cores": (
+                        self.maximum_depth_cpu_cores
+                    ),
+                    "memory_growth_bytes": self.maximum_memory_growth_bytes,
+                    "maximum_pending_work": self.maximum_pending_work,
+                },
+            },
+        }
+
+    def _with_detection_distance(self, cloud: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(cloud)
+        enriched["hazard_groups"] = [
+            self._with_detection_distance(group)
+            for group in cloud.get("hazard_groups", [])
+        ]
+        stamp_ns = cloud.get("source_stamp_max_ns")
+        pose = self._odom.interpolate(int(stamp_ns)) if stamp_ns else None
+        if pose is None:
+            enriched["confirmed_detection_distance_m"] = None
+            enriched["rgb_cable_confirmed_detection_distance_m"] = None
+            return enriched
+        robot_x, robot_y, _ = pose.translation
+        for prefix in ("", "rgb_cable_"):
+            x_value = cloud.get(f"{prefix}centroid_x_m")
+            y_value = cloud.get(f"{prefix}centroid_y_m")
+            key = f"{prefix}confirmed_detection_distance_m"
+            enriched[key] = (
+                round(
+                    math.hypot(
+                        float(x_value) - robot_x,
+                        float(y_value) - robot_y,
+                    ),
+                    6,
+                )
+                if x_value is not None and y_value is not None
+                else None
+            )
+        return enriched
+
+
+def _point_metrics(
+    points: list[tuple[float, float, float]],
+    evidence_masks: list[int],
+    source_stamps_ns: list[int],
+    confirmation_spreads: list[float | None],
+    confirmation_latencies_ms: list[float | None],
+) -> dict[str, object]:
+    rgb_cable_points = [
+        point
+        for point, evidence_mask in zip(points, evidence_masks, strict=True)
+        if evidence_mask & int(EvidenceMask.RGB_CABLE)
+    ]
+    x_values = [point[0] for point in points]
+    y_values = [point[1] for point in points]
+    z_values = sorted(point[2] for point in points)
+    spreads = [value for value in confirmation_spreads if value is not None]
+    latencies = [
+        value for value in confirmation_latencies_ms if value is not None
+    ]
+    return {
+        "point_count": len(points),
+        "p20_height_m": _percentile(z_values, 0.20),
+        "p90_height_m": _percentile(z_values, 0.90),
+        "horizontal_span_m": round(_horizontal_span(points), 6),
+        "centroid_x_m": (
+            round(sum(x_values) / len(x_values), 6) if x_values else None
+        ),
+        "centroid_y_m": (
+            round(sum(y_values) / len(y_values), 6) if y_values else None
+        ),
+        "confirmation_spread_m": (
+            round(max(spreads), 6) if spreads else None
+        ),
+        "rgb_cable_point_count": len(rgb_cable_points),
+        "rgb_cable_span_m": round(_horizontal_span(rgb_cable_points), 6),
+        "rgb_cable_centroid_x_m": (
+            round(
+                sum(point[0] for point in rgb_cable_points)
+                / len(rgb_cable_points),
+                6,
+            )
+            if rgb_cable_points
+            else None
+        ),
+        "rgb_cable_centroid_y_m": (
+            round(
+                sum(point[1] for point in rgb_cable_points)
+                / len(rgb_cable_points),
+                6,
+            )
+            if rgb_cable_points
+            else None
+        ),
+        "source_stamp_min_ns": (
+            min(source_stamps_ns) if source_stamps_ns else None
+        ),
+        "source_stamp_max_ns": (
+            max(source_stamps_ns) if source_stamps_ns else None
+        ),
+        "confirmation_latency_ms": (
+            round(max(latencies), 6) if latencies else None
+        ),
+    }
 
 
 def _spin_until(
@@ -272,6 +499,7 @@ def _run_once(
     cloud_topic: str,
     rate: float,
     startup_timeout: float,
+    playback_topics: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     collector = _Collector(health_topic, cloud_topic)
     launch = subprocess.Popen(
@@ -295,8 +523,7 @@ def _run_once(
                 "geometric hazard node did not become observable"
             )
         collector.clear()
-        playback = subprocess.Popen(
-            [
+        playback_command = [
                 "ros2",
                 "bag",
                 "play",
@@ -306,7 +533,11 @@ def _run_once(
                 str(rate),
                 "--read-ahead-queue-size",
                 "1000",
-            ],
+            ]
+        if playback_topics:
+            playback_command.extend(["--topics", *playback_topics])
+        playback = subprocess.Popen(
+            playback_command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
@@ -447,10 +678,28 @@ def _horizontal_span(points: list[tuple[float, float, float]]) -> float:
     ) ** 0.5
 
 
+def _maximum_optional(current: float | None, raw: str | None) -> float | None:
+    if raw in (None, "", "unknown"):
+        return current
+    try:
+        value = float(raw)
+    except ValueError:
+        return current
+    return value if current is None else max(current, value)
+
+
 def _canonical(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "health": result["health"]["canonical"],
         "clouds": result["clouds"],
+        "runtime": {
+            "evaluated_duration_seconds": result["runtime"][
+                "evaluated_duration_seconds"
+            ],
+            "observed_maximum_speed_mps": result["runtime"][
+                "observed_maximum_speed_mps"
+            ],
+        },
     }
 
 
@@ -646,6 +895,7 @@ def _main(args: list[str] | None, *, evidence_mode: str) -> None:
             "clearing_cloud_count": len(clouds) - len(hazard_clouds),
             "observation_blind_zone_retention": blind_zone_audit,
             "rgb_cable_audit": cable_audit,
+            "runtime": baseline["runtime"],
             "canonical": baseline,
             "runs": results,
         },

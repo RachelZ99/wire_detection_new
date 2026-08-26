@@ -353,10 +353,25 @@ The versioned home scene plan is
 `low_profile_hazard_perception/config/home_regression_manifest_v1.json`. Its
 held-out acceptance split covers cable color/material and layout variation,
 power strips/plugs, the specified difficult negatives, all reporting strata,
-and actual 0.3 m/s straight and turning evidence. Tuning and acceptance videos
-cannot share a scene group or bag ID.
+actual 0.3 m/s straight and turning evidence, and RGB/depth/odom/TF/ground/NPU
+failure injections. Tuning and acceptance videos cannot share a scene group or
+bag ID.
 
-After black-box replay has produced one normalized result JSON per scene, run:
+Run the black-box suite in ROS 2 Humble with external bags and odom annotation
+files:
+
+```bash
+ros2 run low_profile_hazard_perception run_home_regression \
+  --bags-directory /path/to/home-bags \
+  --annotations-directory /path/to/home-annotations \
+  --results-directory /path/to/home-regression-results \
+  --output home-regression-report.json \
+  --decision-record home-regression-npu-decision.md
+```
+
+The runner launches the asynchronous perception graph, replays each complete
+bag at least twice, captures operational `odom` clouds and health, and derives
+normalized event results. Re-audit existing immutable results with:
 
 ```bash
 ros2 run low_profile_hazard_perception audit_home_regression \
@@ -365,10 +380,13 @@ ros2 run low_profile_hazard_perception audit_home_regression \
   --decision-record home-regression-npu-decision.md
 ```
 
-The result contract is
+The annotation and result contracts are
+`low_profile_hazard_perception/config/home_regression_scene_annotation_schema_v1.json`
+and
 `low_profile_hazard_perception/config/home_regression_scene_result_schema_v1.json`.
 The audit reports event recall, persistent false events per hour, confirmed
-detection distance, confirmation latency, health failures, resource use, and
+detection distance, confirmation latency, message age, health transitions,
+failure-injection outcomes, resource use, and
 the same metrics stratified by distance, cable appearance, floor, light, robot
 motion, and depth validity. It verifies the bound profile/rule identity,
 two-pass determinism, bag fingerprints, actual evaluated duration, and actual

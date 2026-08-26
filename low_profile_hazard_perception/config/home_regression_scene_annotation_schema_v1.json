@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "low-profile-hazard-perception/home-regression-scene-annotation-v1",
+  "title": "Home regression odom annotations",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scene_id",
+    "events",
+    "negative_regions",
+    "failure_injections"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "scene_id": {"type": "string", "minLength": 1},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "center_odom",
+          "radius_m",
+          "failure_class_if_missed"
+        ],
+        "properties": {
+          "event_id": {"type": "string", "minLength": 1},
+          "center_odom": {
+            "type": "array",
+            "prefixItems": [{"type": "number"}, {"type": "number"}],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "radius_m": {"type": "number", "exclusiveMinimum": 0},
+          "failure_class_if_missed": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "negative_regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "bounds_odom",
+          "failure_class",
+          "persistent_duration_seconds"
+        ],
+        "properties": {
+          "event_id": {"type": "string", "minLength": 1},
+          "bounds_odom": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "number"},
+              {"type": "number"},
+              {"type": "number"},
+              {"type": "number"}
+            ],
+            "items": false,
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "failure_class": {"type": "string", "minLength": 1},
+          "persistent_duration_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "failure_injections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "injection",
+          "playback_topics",
+          "expected_health_state",
+          "forbid_new_confirmed_hazard"
+        ],
+        "properties": {
+          "injection": {"type": "string", "minLength": 1},
+          "bag_id": {"type": "string", "minLength": 1},
+          "playback_topics": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "expected_health_state": {
+            "enum": ["HEALTHY", "DEGRADED", "INVALID"]
+          },
+          "forbid_new_confirmed_hazard": {"type": "boolean"},
+          "expected_npu_state": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

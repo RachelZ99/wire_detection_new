@@ -55,6 +55,7 @@ def _manifest() -> dict[str, object]:
             "low_contrast_cable",
             "reflection_cable_confusion",
         ],
+        "required_failure_injections": [],
         "scenes": [
             {
                 "scene_id": "tune-pink",
@@ -164,6 +165,14 @@ def _result(scene_id: str, event_ids: list[str]) -> dict[str, object]:
         "repeat_count": 2,
         "evaluated_duration_seconds": evaluated_duration,
         "observed_maximum_speed_mps": observed_speed,
+        "message_age_ms": {
+            "maximum": 218.0,
+            "fields": {"rgb_image.sensor_stamp_age_ms": 218.0},
+        },
+        "health_transitions": [
+            {"state": "HEALTHY", "reasons": ""}
+        ],
+        "failure_injection_outcomes": [],
         "event_outcomes": [
             {
                 "event_id": event_id,
@@ -206,6 +215,9 @@ class HomeRegressionTests(unittest.TestCase):
         self.assertEqual(report["decision"], GateDecision.RULE_PATH_PASSES.value)
         self.assertFalse(report["execute_ticket_8"])
         self.assertEqual(report["acceptance_metrics"]["event_recall"], 1.0)
+        self.assertEqual(
+            report["acceptance_metrics"]["message_age_max_ms"], 218.0
+        )
         self.assertEqual(
             report["acceptance_metrics"]["persistent_false_event_count"], 0
         )
@@ -283,6 +295,18 @@ class HomeRegressionTests(unittest.TestCase):
             "full_speed_recording_missing:turning", report["blocking_reasons"]
         )
 
+    def test_partial_scene_duration_cannot_pass_the_planned_scene(self) -> None:
+        results = _passing_results()
+        results["accept-turning"]["evaluated_duration_seconds"] = 1.0
+
+        report = evaluate_home_regression(_manifest(), results)
+
+        self.assertEqual(report["decision"], GateDecision.EVIDENCE_INCOMPLETE.value)
+        self.assertIn(
+            "evaluated_duration_incomplete:accept-turning",
+            report["blocking_reasons"],
+        )
+
     def test_obvious_protrusion_miss_does_not_misroute_to_npu(self) -> None:
         results = _passing_results()
         missed = results["accept-turning"]["event_outcomes"][1]
@@ -301,6 +325,24 @@ class HomeRegressionTests(unittest.TestCase):
             "obvious_protrusion_recall_below_gate",
             report["blocking_reasons"],
         )
+
+    def test_failed_stream_injection_is_non_npu_failure(self) -> None:
+        manifest = _manifest()
+        manifest["required_failure_injections"] = ["rgb"]
+        results = _passing_results()
+        results["accept-turning"]["failure_injection_outcomes"] = [
+            {
+                "injection": "rgb",
+                "health_state": "HEALTHY",
+                "confirmed_hazard_count": 1,
+                "passed": False,
+            }
+        ]
+
+        report = evaluate_home_regression(manifest, results)
+
+        self.assertEqual(report["decision"], GateDecision.NON_NPU_FAILURE.value)
+        self.assertIn("failure_injection_failed:rgb", report["blocking_reasons"])
 
     def test_scene_group_cannot_leak_between_tuning_and_acceptance(self) -> None:
         manifest = copy.deepcopy(_manifest())

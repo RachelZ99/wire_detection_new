@@ -7,8 +7,11 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from jsonschema import Draft202012Validator
 
 
 class GateDecision(str, Enum):
@@ -74,6 +77,21 @@ def evaluate_home_regression(
     npu_eligible = set(suite["npu_eligible_failure_classes"])
     npu_failure_classes: set[str] = set()
     non_npu_reasons: list[str] = []
+    injection_outcomes = {
+        str(outcome["injection"]): outcome
+        for result in accepted_results.values()
+        for outcome in result["failure_injection_outcomes"]
+    }
+    required_injections = set(suite["required_failure_injections"])
+    blocking_reasons.extend(
+        f"failure_injection_missing:{injection}"
+        for injection in sorted(required_injections - set(injection_outcomes))
+    )
+    non_npu_reasons.extend(
+        f"failure_injection_failed:{injection}"
+        for injection in sorted(required_injections & set(injection_outcomes))
+        if injection_outcomes[injection]["passed"] is not True
+    )
 
     if not blocking_reasons:
         recall_by_kind = acceptance_metrics["event_recall_by_hazard_kind"]
@@ -185,6 +203,10 @@ def evaluate_home_regression(
             acceptance_scenes, accepted_results
         ),
         "coverage": _coverage_report(suite, acceptance_scenes),
+        "failure_injections": {
+            injection: dict(injection_outcomes[injection])
+            for injection in sorted(injection_outcomes)
+        },
         "evidence_label": (
             "home feasibility evidence; not factory validation"
         ),
@@ -248,6 +270,8 @@ def render_home_regression_decision(report: Mapping[str, object]) -> str:
         f"{_format_metric(metrics['confirmation_latency_p95_ms'], 'ms')} / "
         f"{_format_metric(metrics['confirmation_latency_max_ms'], 'ms')}\n"
         f"- Health failures: {metrics['health_failure_count']}\n"
+        "- Message age (maximum): "
+        f"{_format_metric(metrics['message_age_max_ms'], 'ms')}\n"
         "- Resource use (worst scene): processing P95 "
         f"{_format_metric(resource['processing_p95_ms'], 'ms')}, depth "
         f"{_format_metric(resource['depth_geometry_average_cpu_cores'], 'cores')}, "
@@ -353,6 +377,40 @@ def default_home_regression_manifest_path() -> Path:
     return source
 
 
+def default_home_regression_result_schema_path() -> Path:
+    """Locate the installed normalized scene-result contract."""
+    manifest_path = default_home_regression_manifest_path()
+    schema_path = manifest_path.with_name(
+        "home_regression_scene_result_schema_v1.json"
+    )
+    if not schema_path.exists():
+        raise FileNotFoundError("home regression result schema is not installed")
+    return schema_path
+
+
+@lru_cache(maxsize=1)
+def _result_validator() -> Draft202012Validator:
+    schema = _json_object(
+        default_home_regression_result_schema_path().read_bytes(),
+        label="home regression result schema",
+    )
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
+
+
+def _result_schema_reasons(
+    scene_id: str, result: Mapping[str, object]
+) -> list[str]:
+    reasons = []
+    for error in sorted(
+        _result_validator().iter_errors(dict(result)),
+        key=lambda item: tuple(str(part) for part in item.absolute_path),
+    ):
+        path = ".".join(str(part) for part in error.absolute_path) or "root"
+        reasons.append(f"result_schema_invalid:{scene_id}:{path}")
+    return reasons
+
+
 def _validate_manifest(manifest: Mapping[str, object]) -> dict[str, Any]:
     if int(manifest.get("schema_version", 0)) != 1:
         raise ValueError("unsupported home regression manifest schema")
@@ -446,12 +504,17 @@ def _validate_manifest(manifest: Mapping[str, object]) -> dict[str, Any]:
     thresholds = manifest.get("thresholds")
     coverage = manifest.get("required_acceptance_coverage")
     eligible = manifest.get("npu_eligible_failure_classes")
+    required_injections = manifest.get("required_failure_injections", [])
     if not isinstance(thresholds, Mapping):
         raise ValueError("manifest thresholds must be an object")
     if not isinstance(coverage, Mapping):
         raise ValueError("required_acceptance_coverage must be an object")
     if not isinstance(eligible, Sequence) or isinstance(eligible, str):
         raise ValueError("npu_eligible_failure_classes must be a list")
+    if not isinstance(required_injections, Sequence) or isinstance(
+        required_injections, str
+    ):
+        raise ValueError("required_failure_injections must be a list")
     recall = thresholds.get("minimum_event_recall")
     if not isinstance(recall, Mapping):
         raise ValueError("minimum_event_recall must be an object")
@@ -486,6 +549,9 @@ def _validate_manifest(manifest: Mapping[str, object]) -> dict[str, Any]:
             for key, value in coverage.items()
         },
         "npu_eligible_failure_classes": tuple(str(item) for item in eligible),
+        "required_failure_injections": tuple(
+            str(item) for item in required_injections
+        ),
     }
 
 
@@ -551,9 +617,10 @@ def _result_contract_reasons(
     result: Mapping[str, object],
 ) -> list[str]:
     scene_id = scene["scene_id"]
+    schema_reasons = _result_schema_reasons(scene_id, result)
+    if schema_reasons:
+        return schema_reasons
     reasons: list[str] = []
-    if int(result.get("schema_version", 0)) != 1:
-        reasons.append(f"unsupported_result_schema:{scene_id}")
     for key in (
         "scene_id",
         "bag_id",
@@ -569,38 +636,20 @@ def _result_contract_reasons(
             expected = suite[key]
         if result.get(key) != expected:
             reasons.append(f"result_identity_mismatch:{scene_id}:{key}")
-    bag_sha256 = result.get("bag_sha256")
-    if (
-        not isinstance(bag_sha256, str)
-        or len(bag_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in bag_sha256)
-    ):
-        reasons.append(f"invalid_bag_sha256:{scene_id}")
-    if result.get("deterministic") is not True:
-        reasons.append(f"non_deterministic_replay:{scene_id}")
-    try:
-        repeat_count = int(result.get("repeat_count", 0))
-    except (TypeError, ValueError):
-        repeat_count = 0
-    if repeat_count < 2:
-        reasons.append(f"insufficient_replay_repeats:{scene_id}")
     for key in ("evaluated_duration_seconds", "observed_maximum_speed_mps"):
-        try:
-            value = float(result[key])
-        except (KeyError, TypeError, ValueError):
-            reasons.append(f"missing_scene_metric:{scene_id}:{key}")
-            continue
-        if value < 0.0 or (key == "evaluated_duration_seconds" and value == 0.0):
-            reasons.append(f"invalid_scene_metric:{scene_id}:{key}")
+        value = float(result[key])
         if (
             key == "observed_maximum_speed_mps"
             and value
             > float(suite.get("maximum_validated_speed_mps", 0.3)) + 1e-9
         ):
             reasons.append(f"observed_speed_exceeds_profile:{scene_id}")
-    outcomes = result.get("event_outcomes")
-    if not isinstance(outcomes, Sequence) or isinstance(outcomes, str):
-        return reasons + [f"invalid_event_outcomes:{scene_id}"]
+        if (
+            key == "evaluated_duration_seconds"
+            and value + 1e-6 < float(scene["duration_seconds"])
+        ):
+            reasons.append(f"evaluated_duration_incomplete:{scene_id}")
+    outcomes = result["event_outcomes"]
     expected_ids = {event["event_id"] for event in scene["expected_events"]}
     outcome_ids = [
         outcome.get("event_id")
@@ -612,42 +661,13 @@ def _result_contract_reasons(
     if set(outcome_ids) != expected_ids:
         reasons.append(f"event_outcomes_mismatch:{scene_id}")
     for outcome in outcomes:
-        if not isinstance(outcome, Mapping):
-            continue
-        detected = outcome.get("detected")
-        if not isinstance(detected, bool):
-            reasons.append(f"invalid_event_detection:{scene_id}")
-        if detected:
+        if outcome["detected"]:
             for key in (
                 "confirmed_detection_distance_m",
                 "confirmation_latency_ms",
             ):
-                try:
-                    value = float(outcome[key])
-                except (KeyError, TypeError, ValueError):
+                if outcome[key] is None:
                     reasons.append(f"missing_event_metric:{scene_id}:{key}")
-                    continue
-                if value < 0.0:
-                    reasons.append(f"invalid_event_metric:{scene_id}:{key}")
-    for key in ("persistent_false_events", "health_failures"):
-        value = result.get(key)
-        if not isinstance(value, Sequence) or isinstance(value, str):
-            reasons.append(f"invalid_{key}:{scene_id}")
-    resource = result.get("resource_use")
-    if not isinstance(resource, Mapping):
-        reasons.append(f"missing_resource_use:{scene_id}")
-    else:
-        for key in (
-            "processing_p95_ms",
-            "depth_geometry_average_cpu_cores",
-            "memory_growth_bytes",
-            "maximum_pending_work",
-        ):
-            try:
-                if float(resource[key]) < 0.0:
-                    raise ValueError
-            except (KeyError, TypeError, ValueError):
-                reasons.append(f"invalid_resource_metric:{scene_id}:{key}")
     return reasons
 
 
@@ -668,6 +688,7 @@ def _aggregate_metrics(
     memory: list[float] = []
     pending: list[float] = []
     observed_speeds: list[float] = []
+    message_ages: list[float] = []
     completed_duration = 0.0
     for scene in scenes:
         result = results.get(scene["scene_id"])
@@ -675,6 +696,7 @@ def _aggregate_metrics(
             continue
         completed_duration += float(result["evaluated_duration_seconds"])
         observed_speeds.append(float(result["observed_maximum_speed_mps"]))
+        message_ages.append(float(result["message_age_ms"]["maximum"]))
         outcomes = {
             outcome["event_id"]: outcome
             for outcome in result["event_outcomes"]
@@ -726,6 +748,7 @@ def _aggregate_metrics(
         "confirmation_latency_max_ms": max(latencies, default=None),
         "confirmation_latency_p95_ms": _percentile(latencies, 0.95),
         "health_failure_count": health_failure_count,
+        "message_age_max_ms": max(message_ages, default=None),
         "observed_maximum_speed_mps": max(observed_speeds, default=None),
         "resource_use": {
             "processing_p95_ms": max(processing, default=None),

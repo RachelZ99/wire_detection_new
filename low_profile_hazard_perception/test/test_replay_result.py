@@ -61,6 +61,10 @@ class ReplayResultTests(unittest.TestCase):
             report["canonical"]["stable_values"],
         )
         self.assertEqual(
+            report["latest_volatile_values"]["resource.memory_rss_bytes"],
+            "126877696",
+        )
+        self.assertEqual(
             report["canonical"]["stable_values"][
                 "depth_image.delivered_count"
             ],

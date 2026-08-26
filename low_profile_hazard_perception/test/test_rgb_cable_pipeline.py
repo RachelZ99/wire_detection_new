@@ -488,6 +488,7 @@ class RgbCablePipelineTests(unittest.TestCase):
         self.assertEqual(len(second.confirmed), 1)
         confirmed = second.confirmed[0]
         self.assertEqual(confirmed.sensor_stamp_ns, 1_200_000_000)
+        self.assertEqual(confirmed.confirmation_latency_ns, 200_000_000)
         self.assertIn(EvidenceSource.RGB_CABLE, confirmed.evidence)
         self.assertLess(confirmed.spatial_spread_m, 0.03)
         self.assertEqual(len(second.retained), 1)

@@ -64,6 +64,11 @@ class ReplayResultAccumulator:
             for key, value in sorted(self._latest_values.items())
             if not is_volatile_field(key)
         }
+        latest_volatile_values = {
+            key: value
+            for key, value in sorted(self._latest_values.items())
+            if is_volatile_field(key)
+        }
         timing_ranges = {
             key: {
                 "minimum": min(samples),
@@ -81,5 +86,6 @@ class ReplayResultAccumulator:
             },
             "transitions": list(self._transitions),
             "timing_ranges_ms": timing_ranges,
+            "latest_volatile_values": latest_volatile_values,
             "invalid_observed": self._invalid_observed,
         }

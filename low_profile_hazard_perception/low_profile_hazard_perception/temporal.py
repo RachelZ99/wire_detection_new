@@ -307,6 +307,7 @@ class ConfirmedHazard:
     evidence: tuple[EvidenceSource, ...]
     confidence: float
     spatial_spread_m: float
+    confirmation_latency_ns: int
 
 
 @dataclass(frozen=True)
@@ -353,6 +354,7 @@ class _Track:
     evidence: set[EvidenceSource] = field(default_factory=set)
     confidence: float = 0.0
     confirmed: bool = False
+    confirmation_latency_ns: int = 0
     refresh_centroids: list[Point3] = field(default_factory=list)
     refresh_last_stamp_ns: int | None = None
     refresh_latest_points: tuple[Point3, ...] = ()
@@ -538,6 +540,9 @@ class HazardTracker:
             reason = self._pending_reason(observation, can_confirm)
             return self._decision(track, (), reason)
         track.confirmed = True
+        track.confirmation_latency_ns = (
+            max(track.confirmation_stamps) - min(track.confirmation_stamps)
+        )
         confirmed = (self._confirmed_hazard(track),)
         return self._decision(track, confirmed, self._confirmation_reason(track))
 
@@ -648,6 +653,9 @@ class HazardTracker:
         track.refresh_confidence = max(track.refresh_confidence, observation.confidence)
         if len(track.refresh_centroids) < 2:
             return ()
+        track.confirmation_latency_ns = (
+            max(track.refresh_stamps) - min(track.refresh_stamps)
+        )
         track.last_stamp_ns = max(track.last_stamp_ns, *track.refresh_stamps)
         track.observation_centroids.extend(track.refresh_centroids)
         track.confirmation_stamps.update(track.refresh_stamps)
@@ -710,6 +718,7 @@ class HazardTracker:
             evidence=tuple(sorted(track.evidence, key=lambda item: item.value)),
             confidence=self._track_confidence(track),
             spatial_spread_m=spread,
+            confirmation_latency_ns=track.confirmation_latency_ns,
         )
 
     @staticmethod
