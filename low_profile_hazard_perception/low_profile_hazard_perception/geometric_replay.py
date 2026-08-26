@@ -208,7 +208,15 @@ class _Collector(Node):
             (
                 field
                 for field in message.fields
-                if field.name == "hazard_group_id"
+                if field.name == "cloud_group_index"
+            ),
+            None,
+        )
+        track_field = next(
+            (
+                field
+                for field in message.fields
+                if field.name == "hazard_track_id"
             ),
             None,
         )
@@ -261,6 +269,16 @@ class _Collector(Node):
             if group_field is not None
             else [0] * len(points)
         )
+        track_ids = (
+            [
+                struct.unpack_from(
+                    "<I", bytes(message.data), offset + track_field.offset
+                )[0]
+                for offset in offsets
+            ]
+            if track_field is not None
+            else group_ids
+        )
         source_stamps_ns: list[int] = []
         if (
             stamp_sec_field is not None
@@ -289,15 +307,16 @@ class _Collector(Node):
             confirmation_latencies_ms,
         )
         hazard_groups = []
-        for group_id in sorted(set(group_ids)):
+        for group_index in sorted(set(group_ids)):
             indices = [
                 index
                 for index, value in enumerate(group_ids)
-                if value == group_id
+                if value == group_index
             ]
             hazard_groups.append(
                 {
-                    "hazard_group_id": group_id,
+                    "cloud_group_index": group_index,
+                    "hazard_track_id": track_ids[indices[0]],
                     **_point_metrics(
                         [points[index] for index in indices],
                         [evidence_masks[index] for index in indices],
@@ -465,7 +484,15 @@ def _point_metrics(
         "confirmation_latency_ms": (
             round(max(latencies), 6) if latencies else None
         ),
+        "evidence_mask": _combined_evidence_mask(evidence_masks),
     }
+
+
+def _combined_evidence_mask(evidence_masks: list[int]) -> int:
+    combined = 0
+    for evidence_mask in evidence_masks:
+        combined |= evidence_mask
+    return combined
 
 
 def _spin_until(

@@ -77,6 +77,7 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
         self.assertEqual(first, ())
         self.assertEqual(len(second), 1)
         confirmed = second[0]
+        self.assertEqual(confirmed.hazard_track_id, 0)
         self.assertEqual(confirmed.observation_count, 2)
         self.assertEqual(confirmed.sensor_stamp_ns, 1_100_000_000)
         self.assertEqual(confirmed.confirmation_latency_ns, 100_000_000)

@@ -489,7 +489,8 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
         assert "observation_stamp_nanosec" in field_names
         assert "evidence_mask" in field_names
         assert "confirmation_latency_ms" in field_names
-        assert "hazard_group_id" in field_names
+        assert "cloud_group_index" in field_names
+        assert "hazard_track_id" in field_names
         evidence_field = next(
             field for field in cloud.fields if field.name == "evidence_mask"
         )

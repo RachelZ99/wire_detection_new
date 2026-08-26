@@ -71,13 +71,15 @@
         "required": [
           "injection",
           "health_state",
-          "confirmed_hazard_count",
+          "failure_observed",
+          "new_confirmed_hazard_observed",
           "passed"
         ],
         "properties": {
           "injection": {"type": "string", "minLength": 1},
           "health_state": {"enum": ["HEALTHY", "DEGRADED", "INVALID"]},
-          "confirmed_hazard_count": {"type": "integer", "minimum": 0},
+          "failure_observed": {"type": "boolean"},
+          "new_confirmed_hazard_observed": {"type": "boolean"},
           "passed": {"type": "boolean"}
         },
         "additionalProperties": false

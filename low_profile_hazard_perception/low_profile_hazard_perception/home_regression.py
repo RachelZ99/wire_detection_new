@@ -60,6 +60,7 @@ def evaluate_home_regression(
         if scene["split"] == "acceptance":
             accepted_results[scene_id] = result
 
+    blocking_reasons.extend(_bag_content_split_reasons(scenes, all_results))
     blocking_reasons.extend(
         _full_speed_result_reasons(suite, acceptance_scenes, accepted_results)
     )
@@ -77,11 +78,12 @@ def evaluate_home_regression(
     npu_eligible = set(suite["npu_eligible_failure_classes"])
     npu_failure_classes: set[str] = set()
     non_npu_reasons: list[str] = []
-    injection_outcomes = {
-        str(outcome["injection"]): outcome
-        for result in accepted_results.values()
-        for outcome in result["failure_injection_outcomes"]
-    }
+    injection_outcomes: dict[str, list[Mapping[str, object]]] = {}
+    for result in accepted_results.values():
+        for outcome in result["failure_injection_outcomes"]:
+            injection_outcomes.setdefault(
+                str(outcome["injection"]), []
+            ).append(outcome)
     required_injections = set(suite["required_failure_injections"])
     blocking_reasons.extend(
         f"failure_injection_missing:{injection}"
@@ -90,7 +92,10 @@ def evaluate_home_regression(
     non_npu_reasons.extend(
         f"failure_injection_failed:{injection}"
         for injection in sorted(required_injections & set(injection_outcomes))
-        if injection_outcomes[injection]["passed"] is not True
+        if any(
+            outcome["passed"] is not True
+            for outcome in injection_outcomes[injection]
+        )
     )
 
     if not blocking_reasons:
@@ -204,7 +209,7 @@ def evaluate_home_regression(
         ),
         "coverage": _coverage_report(suite, acceptance_scenes),
         "failure_injections": {
-            injection: dict(injection_outcomes[injection])
+            injection: [dict(outcome) for outcome in injection_outcomes[injection]]
             for injection in sorted(injection_outcomes)
         },
         "evidence_label": (
@@ -586,6 +591,29 @@ def _full_speed_result_reasons(
             for scene in scenes
         )
     ]
+
+
+def _bag_content_split_reasons(
+    scenes: Sequence[Mapping[str, Any]],
+    results: Mapping[str, Mapping[str, object]],
+) -> list[str]:
+    by_digest: dict[str, dict[str, list[str]]] = {}
+    for scene in scenes:
+        scene_id = scene["scene_id"]
+        result = results.get(scene_id)
+        if result is None:
+            continue
+        by_digest.setdefault(str(result["bag_sha256"]), {}).setdefault(
+            str(scene["split"]), []
+        ).append(scene_id)
+    reasons: list[str] = []
+    for splits in by_digest.values():
+        for tuning_id in sorted(splits.get("tuning", [])):
+            for acceptance_id in sorted(splits.get("acceptance", [])):
+                reasons.append(
+                    f"bag_content_leak:{tuning_id}:{acceptance_id}"
+                )
+    return reasons
 
 
 def _coverage_report(

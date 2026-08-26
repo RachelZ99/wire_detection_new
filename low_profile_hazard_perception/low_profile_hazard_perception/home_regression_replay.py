@@ -19,6 +19,7 @@ from .home_regression import (
     default_home_regression_manifest_path,
     main as audit_main,
 )
+from .temporal import EvidenceMask
 
 
 def normalize_home_scene_replay(
@@ -54,8 +55,9 @@ def normalize_home_scene_replay(
     event_annotations = _annotation_events(scene, annotation)
     baseline = runs[0]
     hazard_clouds = _hazard_groups(baseline["clouds"])
+    event_hazards = _unique_hazards(hazard_clouds)
     outcomes = [
-        _event_outcome(event, event_annotations[event["event_id"]], hazard_clouds)
+        _event_outcome(event, event_annotations[event["event_id"]], event_hazards)
         for event in scene["expected_events"]
     ]
     false_events = _persistent_false_events(
@@ -207,31 +209,47 @@ def _hazard_groups(
     return groups
 
 
+def _unique_hazards(
+    groups: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    earliest: dict[object, Mapping[str, object]] = {}
+    for index, group in enumerate(groups):
+        key = group.get("hazard_track_id", ("untracked", index))
+        prior = earliest.get(key)
+        if prior is None or int(group.get("source_stamp_max_ns") or 0) < int(
+            prior.get("source_stamp_max_ns") or 0
+        ):
+            earliest[key] = group
+    return list(earliest.values())
+
+
 def _annotation_events(
     scene: Mapping[str, object], annotation: Mapping[str, object]
 ) -> dict[str, Mapping[str, object]]:
-    raw = annotation.get("events")
-    if not isinstance(raw, Sequence) or isinstance(raw, str):
-        raise ValueError(f"scene {scene['scene_id']} annotation events must be a list")
+    raw = annotation["events"]
+    assert isinstance(raw, Sequence) and not isinstance(raw, str)
     events = {
         str(item["event_id"]): item
         for item in raw
-        if isinstance(item, Mapping) and item.get("event_id")
+        if isinstance(item, Mapping)
     }
     expected = {event["event_id"] for event in scene["expected_events"]}
     if set(events) != expected:
         raise ValueError(f"scene {scene['scene_id']} annotation events mismatch")
-    for event_id, event in events.items():
-        center = event.get("center_odom")
-        if (
-            not isinstance(center, Sequence)
-            or isinstance(center, str)
-            or len(center) != 2
-            or float(event.get("radius_m", 0.0)) <= 0.0
-        ):
-            raise ValueError(
-                f"scene {scene['scene_id']} event {event_id} has invalid odom region"
+    event_items = list(events.items())
+    for index, (first_id, first) in enumerate(event_items):
+        first_x, first_y = (float(value) for value in first["center_odom"])
+        for second_id, second in event_items[index + 1 :]:
+            second_x, second_y = (
+                float(value) for value in second["center_odom"]
             )
+            if math.hypot(first_x - second_x, first_y - second_y) <= float(
+                first["radius_m"]
+            ) + float(second["radius_m"]):
+                raise ValueError(
+                    f"scene {scene['scene_id']} event regions overlap: "
+                    f"{first_id}, {second_id}"
+                )
     return events
 
 
@@ -311,14 +329,41 @@ def _persistent_false_events(
             and minimum_x <= float(cloud["centroid_x_m"]) <= maximum_x
             and minimum_y <= float(cloud["centroid_y_m"]) <= maximum_y
         ]
-        if matching:
+        matches_by_track: dict[object, list[Mapping[str, object]]] = {}
+        for index, cloud in enumerate(matching):
+            key = cloud.get("hazard_track_id", ("untracked", index))
+            matches_by_track.setdefault(key, []).append(cloud)
+        for track_id, track_matches in matches_by_track.items():
+            first_observation_ns = min(
+                int(cloud.get("source_stamp_max_ns") or 0)
+                - int(float(cloud.get("confirmation_latency_ms") or 0.0) * 1_000_000)
+                for cloud in track_matches
+            )
+            last_confirmation_ns = max(
+                int(cloud.get("source_stamp_max_ns") or 0)
+                for cloud in track_matches
+            )
+            measured_duration = max(
+                0.0,
+                (last_confirmation_ns - first_observation_ns) / 1_000_000_000,
+            )
+            minimum_duration = float(region["minimum_persistence_seconds"])
+            if measured_duration + 1e-9 < minimum_duration:
+                continue
+            has_rgb_evidence = any(
+                int(cloud.get("evidence_mask") or 0)
+                & int(EvidenceMask.RGB_CABLE)
+                for cloud in track_matches
+            )
             events.append(
                 {
-                    "event_id": str(region["event_id"]),
-                    "failure_class": str(region["failure_class"]),
-                    "duration_seconds": float(
-                        region.get("persistent_duration_seconds", 2.0)
+                    "event_id": f"{region['event_id']}:{track_id}",
+                    "failure_class": (
+                        str(region["failure_class"])
+                        if has_rgb_evidence
+                        else "geometry_false_positive"
                     ),
+                    "duration_seconds": round(measured_duration, 6),
                 }
             )
     return events
@@ -339,7 +384,7 @@ def _failure_injection_outcomes(
             continue
         run = runs[name]
         state = str(run["health"]["canonical"]["state"])
-        hazard_count = sum(
+        new_hazard_observed = any(
             not cloud.get("clearing") for cloud in run["clouds"]
         )
         expected_state = str(injection.get("expected_health_state", "DEGRADED"))
@@ -348,18 +393,48 @@ def _failure_injection_outcomes(
         actual_npu_state = run["health"]["latest_volatile_values"].get(
             "resource.npu_state"
         )
-        passed = state == expected_state and (not forbid_hazard or hazard_count == 0)
+        failure_observed = _failure_observed(name, run, actual_npu_state)
+        passed = failure_observed and state == expected_state and (
+            not forbid_hazard or not new_hazard_observed
+        )
         if expected_npu_state is not None:
             passed = passed and actual_npu_state == expected_npu_state
         outcomes.append(
             {
                 "injection": name,
                 "health_state": state,
-                "confirmed_hazard_count": hazard_count,
+                "failure_observed": failure_observed,
+                "new_confirmed_hazard_observed": new_hazard_observed,
                 "passed": passed,
             }
         )
     return outcomes
+
+
+def _failure_observed(
+    injection: str,
+    run: Mapping[str, Any],
+    actual_npu_state: object,
+) -> bool:
+    if injection == "npu":
+        return actual_npu_state in {
+            "disabled_rule_profile",
+            "unavailable",
+            "failed",
+        }
+    health = run["health"]
+    reason_text = " ".join(
+        str(transition.get("reasons", ""))
+        for transition in health["transitions"]
+    ).lower()
+    stable = health["canonical"]["stable_values"]
+    reason_text += " " + str(stable.get("reasons", "")).lower()
+    if injection == "ground_model":
+        return "ground" in reason_text or stable.get("ground.state") in {
+            "REJECTED",
+            "UNAVAILABLE",
+        }
+    return injection in reason_text
 
 
 def _required_number(
@@ -385,6 +460,22 @@ def _bag_sha256(path: Path) -> str:
             while block := stream.read(1024 * 1024):
                 digest.update(block)
     return digest.hexdigest()
+
+
+def _ensure_fresh_result_targets(
+    results_directory: Path,
+    scenes: Sequence[Mapping[str, object]],
+) -> None:
+    existing = [
+        str(scene["result_file"])
+        for scene in scenes
+        if (results_directory / str(scene["result_file"])).exists()
+    ]
+    if existing:
+        raise ValueError(
+            "results directory contains stale manifest result files: "
+            + ", ".join(sorted(existing))
+        )
 
 
 def main(args: list[str] | None = None) -> int:
@@ -417,6 +508,9 @@ def main(args: list[str] | None = None) -> int:
         )
         suite = _validate_manifest(manifest)
         options.results_directory.mkdir(parents=True, exist_ok=True)
+        _ensure_fresh_result_targets(
+            options.results_directory, suite["scenes"]
+        )
         import rclpy
 
         from .geometric_replay import _run_once
@@ -458,6 +552,17 @@ def main(args: list[str] | None = None) -> int:
                     if not isinstance(injection, Mapping):
                         raise ValueError("failure injection must be an object")
                     injection_name = str(injection["injection"])
+                    if injection_name == "npu":
+                        if (
+                            injection.get("expected_npu_state")
+                            != "disabled_rule_profile"
+                        ):
+                            raise ValueError(
+                                "rule-profile npu injection must expect "
+                                "disabled_rule_profile"
+                            )
+                        failure_runs[injection_name] = runs[0]
+                        continue
                     injection_bag = options.bags_directory / str(
                         injection.get("bag_id", scene["bag_id"])
                     )

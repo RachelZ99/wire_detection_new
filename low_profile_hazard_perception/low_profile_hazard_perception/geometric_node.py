@@ -779,6 +779,7 @@ class GeometricHazardNode(InputHealthNode):
     ) -> None:
         signature: tuple[object, ...] = tuple(
             (
+                hazard.hazard_track_id,
                 hazard.sensor_stamp_ns,
                 hazard.points_odom,
                 hazard.spatial_spread_m,
@@ -1072,9 +1073,10 @@ def _point_cloud(
             divmod(hazard.sensor_stamp_ns, 1_000_000_000),
             int(EvidenceMask.from_sources(hazard.evidence)),
             hazard.confirmation_latency_ns / 1_000_000,
-            hazard_group_id,
+            cloud_group_index,
+            hazard.hazard_track_id,
         )
-        for hazard_group_id, hazard in enumerate(retained)
+        for cloud_group_index, hazard in enumerate(retained)
         for point in hazard.points_odom
     )
     cloud.height = 1
@@ -1114,25 +1116,32 @@ def _point_cloud(
             count=1,
         ),
         PointField(
-            name="hazard_group_id",
+            name="cloud_group_index",
             offset=32,
+            datatype=PointField.UINT32,
+            count=1,
+        ),
+        PointField(
+            name="hazard_track_id",
+            offset=36,
             datatype=PointField.UINT32,
             count=1,
         ),
     ]
     cloud.is_bigendian = False
-    cloud.point_step = 36
+    cloud.point_step = 40
     cloud.row_step = cloud.point_step * cloud.width
     cloud.data = b"".join(
         struct.pack(
-            "<ffffiIB3xfI",
+            "<ffffiIB3xfII",
             *point,
             confirmation_spread_m,
             stamp_parts[0],
             stamp_parts[1],
             evidence_mask,
             confirmation_latency_ms,
-            hazard_group_id,
+            cloud_group_index,
+            hazard_track_id,
         )
         for (
             point,
@@ -1140,7 +1149,8 @@ def _point_cloud(
             stamp_parts,
             evidence_mask,
             confirmation_latency_ms,
-            hazard_group_id,
+            cloud_group_index,
+            hazard_track_id,
         ) in points
     )
     cloud.is_dense = True

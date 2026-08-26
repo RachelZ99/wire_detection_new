@@ -300,6 +300,7 @@ class HazardObservation:
 
 @dataclass(frozen=True)
 class ConfirmedHazard:
+    hazard_track_id: int
     sensor_stamp_ns: int
     points_odom: tuple[Point3, ...]
     centroid: Point3
@@ -341,6 +342,7 @@ class HazardTrackerConfig:
 
 @dataclass
 class _Track:
+    hazard_track_id: int
     first_stamp_ns: int
     last_stamp_ns: int
     observation_centroids: list[Point3]
@@ -378,10 +380,12 @@ class HazardTracker:
         self.config = config or HazardTrackerConfig()
         self._tracks: list[_Track] = []
         self._latest_sensor_stamp_ns = 0
+        self._next_hazard_track_id = 0
 
     def clear(self) -> None:
         self._tracks.clear()
         self._latest_sensor_stamp_ns = 0
+        self._next_hazard_track_id = 0
 
     def clear_candidates(self) -> None:
         """Discard unconfirmed accumulation without clearing known hazards."""
@@ -516,6 +520,7 @@ class HazardTracker:
         else:
             counts_for_confirmation = can_confirm
             track = _Track(
+                hazard_track_id=self._next_hazard_track_id,
                 first_stamp_ns=observation.sensor_stamp_ns,
                 last_stamp_ns=observation.sensor_stamp_ns,
                 observation_centroids=[] if not can_confirm else [centroid],
@@ -535,6 +540,7 @@ class HazardTracker:
                 evidence={observation.evidence},
                 confidence=observation.confidence,
             )
+            self._next_hazard_track_id += 1
             self._tracks.append(track)
         if len(track.observation_centroids) < 2 or not counts_for_confirmation:
             reason = self._pending_reason(observation, can_confirm)
@@ -711,6 +717,7 @@ class HazardTracker:
             for point in track.observation_centroids
         )
         return ConfirmedHazard(
+            hazard_track_id=track.hazard_track_id,
             sensor_stamp_ns=track.latest_points_stamp_ns,
             points_odom=track.latest_points,
             centroid=track.centroid,

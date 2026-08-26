@@ -19,8 +19,10 @@ keeps tuning videos and held-out acceptance videos in different
   cable-invalid depth, stationary motion, and 0.3 m/s straight and turning
   recordings;
 - injected RGB, depth, odom, TF, observed-ground-model, and optional-NPU
-  failures, each with an expected health state and a prohibition on unsupported
-  newly confirmed hazards.
+  failures, each with an expected health state and evidence that the named
+  failure actually occurred. In the rule-only profile, NPU unavailability is
+  verified through the reported `disabled_rule_profile` state while geometry
+  continues independently.
 
 The bag files, odom annotations, and result JSON files are external evidence
 artifacts and are not invented or checked into this repository. Annotation
@@ -42,8 +44,9 @@ Event metrics come from the operational interface:
 - confirmed detection distance is robot-to-hazard distance at the confirming
   source stamp after odom interpolation;
 - one retained hazard is one event; republished frames do not increase recall;
-- a false event is a confirmed hazard in an annotated negative region, not a
-  candidate mask pixel.
+- a false event is a confirmed hazard whose measured same-track capture span
+  meets the negative-region persistence threshold, not a candidate mask pixel;
+  only groups carrying RGB-cable evidence can justify an RGB/NPU failure class.
 
 Run the full black-box suite in ROS 2 Humble. For each available scene this
 command launches the asynchronous perception graph, replays the complete bag
@@ -59,6 +62,10 @@ ros2 run low_profile_hazard_perception run_home_regression \
   --output home-regression-report.json \
   --decision-record home-regression-npu-decision.md
 ```
+
+Use a fresh results directory for each run. The runner refuses to reuse a
+manifest result filename, so a missing bag or annotation cannot silently fall
+back to evidence from an older run.
 
 To re-audit already captured, immutable results without replaying bags:
 

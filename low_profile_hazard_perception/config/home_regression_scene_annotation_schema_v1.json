@@ -46,7 +46,7 @@
           "event_id",
           "bounds_odom",
           "failure_class",
-          "persistent_duration_seconds"
+          "minimum_persistence_seconds"
         ],
         "properties": {
           "event_id": {"type": "string", "minLength": 1},
@@ -63,7 +63,7 @@
             "maxItems": 4
           },
           "failure_class": {"type": "string", "minLength": 1},
-          "persistent_duration_seconds": {
+          "minimum_persistence_seconds": {
             "type": "number",
             "exclusiveMinimum": 0
           }
@@ -82,7 +82,9 @@
           "forbid_new_confirmed_hazard"
         ],
         "properties": {
-          "injection": {"type": "string", "minLength": 1},
+          "injection": {
+            "enum": ["rgb", "depth", "odom", "tf", "ground_model", "npu"]
+          },
           "bag_id": {"type": "string", "minLength": 1},
           "playback_topics": {
             "type": "array",
@@ -94,7 +96,25 @@
           "forbid_new_confirmed_hazard": {"type": "boolean"},
           "expected_npu_state": {"type": "string", "minLength": 1}
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {"properties": {"injection": {"const": "npu"}}},
+            "then": {
+              "required": ["expected_npu_state"],
+              "properties": {
+                "expected_health_state": {"const": "HEALTHY"},
+                "forbid_new_confirmed_hazard": {"const": false},
+                "expected_npu_state": {"const": "disabled_rule_profile"}
+              }
+            },
+            "else": {
+              "properties": {
+                "expected_health_state": {"enum": ["DEGRADED", "INVALID"]}
+              }
+            }
+          }
+        ]
       }
     }
   },

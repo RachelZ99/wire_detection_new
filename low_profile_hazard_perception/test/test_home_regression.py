@@ -153,11 +153,16 @@ def _result(scene_id: str, event_ids: list[str]) -> dict[str, object]:
         "accept-turning": ("accept-turning-bag", 0.3, 30.0),
     }
     bag_id, observed_speed, evaluated_duration = scene_evidence[scene_id]
+    bag_digest = {
+        "tune-pink": "a",
+        "accept-straight": "b",
+        "accept-turning": "c",
+    }[scene_id] * 64
     return {
         "schema_version": 1,
         "scene_id": scene_id,
         "bag_id": bag_id,
-        "bag_sha256": "a" * 64,
+        "bag_sha256": bag_digest,
         "profile_id": "dcw2-home-640x360-v1",
         "profile_fingerprint": "profile-fingerprint",
         "rule_version": "training-free-thin-line-v1",
@@ -330,11 +335,21 @@ class HomeRegressionTests(unittest.TestCase):
         manifest = _manifest()
         manifest["required_failure_injections"] = ["rgb"]
         results = _passing_results()
+        results["accept-straight"]["failure_injection_outcomes"] = [
+            {
+                "injection": "rgb",
+                "health_state": "DEGRADED",
+                "failure_observed": True,
+                "new_confirmed_hazard_observed": False,
+                "passed": True,
+            }
+        ]
         results["accept-turning"]["failure_injection_outcomes"] = [
             {
                 "injection": "rgb",
                 "health_state": "HEALTHY",
-                "confirmed_hazard_count": 1,
+                "failure_observed": True,
+                "new_confirmed_hazard_observed": True,
                 "passed": False,
             }
         ]
@@ -350,6 +365,20 @@ class HomeRegressionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "scene_group_id"):
             evaluate_home_regression(manifest, _passing_results())
+
+    def test_identical_bag_content_cannot_cross_tuning_and_acceptance(self) -> None:
+        results = _passing_results()
+        results["accept-straight"]["bag_sha256"] = results["tune-pink"][
+            "bag_sha256"
+        ]
+
+        report = evaluate_home_regression(_manifest(), results)
+
+        self.assertEqual(report["decision"], GateDecision.EVIDENCE_INCOMPLETE.value)
+        self.assertIn(
+            "bag_content_leak:tune-pink:accept-straight",
+            report["blocking_reasons"],
+        )
 
     def test_decision_record_is_explicitly_home_only(self) -> None:
         markdown = render_home_regression_decision(
