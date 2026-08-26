@@ -242,16 +242,14 @@ def _event_outcome(
 ) -> dict[str, object]:
     center_x, center_y = (float(value) for value in annotation["center_odom"])
     radius = float(annotation["radius_m"])
-    cable = expected["hazard_kind"] == "cable"
-    prefix = "rgb_cable_" if cable else ""
     matching = [
         cloud
         for cloud in clouds
-        if cloud.get(f"{prefix}centroid_x_m") is not None
-        and cloud.get(f"{prefix}centroid_y_m") is not None
+        if cloud.get("centroid_x_m") is not None
+        and cloud.get("centroid_y_m") is not None
         and math.hypot(
-            float(cloud[f"{prefix}centroid_x_m"]) - center_x,
-            float(cloud[f"{prefix}centroid_y_m"]) - center_y,
+            float(cloud["centroid_x_m"]) - center_x,
+            float(cloud["centroid_y_m"]) - center_y,
         )
         <= radius
     ]
@@ -270,8 +268,7 @@ def _event_outcome(
         matching,
         key=lambda item: int(item.get("source_stamp_max_ns") or 0),
     )
-    distance_key = f"{prefix}confirmed_detection_distance_m"
-    distance = cloud.get(distance_key)
+    distance = cloud.get("confirmed_detection_distance_m")
     latency = cloud.get("confirmation_latency_ms")
     if distance is None or latency is None:
         raise ValueError(

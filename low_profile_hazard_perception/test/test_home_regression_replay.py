@@ -72,11 +72,8 @@ class HomeRegressionReplayTests(unittest.TestCase):
                     "hazard_groups": [
                         {
                             "hazard_group_id": 0,
-                            "rgb_cable_centroid_x_m": 0.81,
-                            "rgb_cable_centroid_y_m": 0.11,
                             "centroid_x_m": 0.81,
                             "centroid_y_m": 0.11,
-                            "rgb_cable_confirmed_detection_distance_m": 0.72,
                             "confirmed_detection_distance_m": 0.72,
                             "confirmation_latency_ms": 100.0,
                         }
