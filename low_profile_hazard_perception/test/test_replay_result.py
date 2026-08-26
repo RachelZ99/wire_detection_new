@@ -19,6 +19,8 @@ class ReplayResultTests(unittest.TestCase):
                 "depth_image.sensor_stamp_age_ms": "20.000",
                 "depth_image.receive_age_ms": "4.000",
                 "depth_image.processing_latency_ms": "2.000",
+                "stage.perception.processing_wall_p95_ms": "55.000",
+                "resource.memory_rss_bytes": "125829120",
             },
         )
         result.record(
@@ -30,6 +32,8 @@ class ReplayResultTests(unittest.TestCase):
                 "depth_image.sensor_stamp_age_ms": "10.000",
                 "depth_image.receive_age_ms": "3.000",
                 "depth_image.processing_latency_ms": "1.000",
+                "stage.perception.processing_wall_p95_ms": "54.000",
+                "resource.memory_rss_bytes": "126877696",
             },
         )
 
@@ -46,6 +50,14 @@ class ReplayResultTests(unittest.TestCase):
         )
         self.assertNotIn(
             "depth_image.receive_age_ms",
+            report["canonical"]["stable_values"],
+        )
+        self.assertNotIn(
+            "stage.perception.processing_wall_p95_ms",
+            report["canonical"]["stable_values"],
+        )
+        self.assertNotIn(
+            "resource.memory_rss_bytes",
             report["canonical"]["stable_values"],
         )
         self.assertEqual(

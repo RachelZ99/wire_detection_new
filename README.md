@@ -297,6 +297,56 @@ also reported with stable `REJECTED_*` reasons. This debug topic is not the
 operational navigation interface; only retained confirmed hazards appear on
 `/low_profile_hazard_perception/confirmed_hazards`.
 
+## Bound detection profile and resource budget
+
+The formal rule path loads
+`low_profile_hazard_perception/config/detection_profile_dcw2_home_640x360_v1.json`
+at startup. Its schema version, profile ID, SHA-256 fingerprint, delivered
+640x360@10 Hz stream and encodings, validated 8--12 Hz delivery range, measured
+0.20--0.25 m height and 1.5--4.0 degree downward-pitch installation range,
+footprint, thresholds, retention, rule/model versions, and 0.3 m/s maximum are
+published under `profile.*` in health. The ROS parameter file remains the launch
+surface, but every detection parameter must exactly match the versioned profile
+or the node refuses to start. A delivered 640x400 image, an observed 0.60 m
+installation, a materially different delivered frame rate or mount pitch, or
+configured/odom-observed speed above 0.3 m/s produces an explicit profile
+mismatch and blocks new confirmation.
+
+All middleware image histories and input work queues are latest-only. The depth
+work slot is also latest-only; the separate RGB event-time reorder buffer stays
+bounded and drops its oldest observation at capacity. Health publishes current
+pending counts and cumulative input, depth, RGB, and middleware drop counts.
+
+`stage.depth_geometry.*`, `stage.rgb_cable.*`, and `stage.perception.*` expose a
+fixed-size measurement window with processing wall time, process CPU time,
+queue wait, sensor-message age, P95, and average CPU-core use. `resource.*`
+exposes process CPU cores, current/peak RSS, RSS growth, retained sample count,
+and NPU state. The rule profile reports the NPU as
+`disabled_rule_profile`; it does not imply an NPU failure. After a minimum
+sample count, exceeding the provisional 80 ms P95 or one-core depth budget
+degrades health with a `budget:*` reason.
+
+Run the complete two-hour resource acceptance against the external reference
+bag on the RK3588 target:
+
+```bash
+ros2 run low_profile_hazard_perception soak_detection_profile \
+  /path/to/wire_rgbd_strip_01 \
+  --duration-seconds 7200 \
+  --output dcw2-home-640x360-v1-soak.json
+```
+
+The command loops the bag, checks that the exact profile ID and fingerprint
+remain bound, and writes measured P95 processing time, average depth CPU cores,
+memory growth, maximum pending input work and RGB reorder depth, frame drops,
+NPU state, sample counts, and machine-readable failure reasons. It also fails
+if the perception launch exits, health becomes stale, or stage processing stops
+progressing. Short runs are deliberately
+reported as `soak_duration_incomplete`; they cannot be presented as the
+two-hour acceptance. The bag and RK3588 runtime are external artifacts, so this
+checkout supplies the reproducible measurement gate but does not claim that
+the hardware soak has already passed.
+
 ## Conservative degradation and retention
 
 Unconfirmed candidates expire after 500 ms and can only confirm inside the

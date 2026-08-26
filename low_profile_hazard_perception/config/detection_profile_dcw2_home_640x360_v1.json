@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "profile_id": "dcw2-home-640x360-v1",
+  "validation": {
+    "phase": "home_feasibility",
+    "maximum_speed_mps": 0.3
+  },
+  "camera": {
+    "width": 640,
+    "height": 360,
+    "rgb_encoding": "rgb8",
+    "depth_encoding": "16UC1",
+    "rate_hz": 10.0,
+    "validated_rate_range_hz": [8.0, 12.0],
+    "frame_id": "camera_1_color_optical_frame"
+  },
+  "installation": {
+    "observed_camera_height_m": 0.225,
+    "validated_height_range_m": [0.20, 0.25],
+    "observed_downward_pitch_degrees": 2.75,
+    "validated_downward_pitch_range_degrees": [1.5, 4.0],
+    "footprint_m": {
+      "minimum_x": -0.25,
+      "maximum_x": 0.375,
+      "minimum_y": -0.30,
+      "maximum_y": 0.30
+    }
+  },
+  "implementation": {
+    "rule_version": "training-free-thin-line-v1",
+    "model_version": "none"
+  },
+  "parameters": {
+    "expected_width": 640,
+    "expected_height": 360,
+    "camera_frame": "camera_1_color_optical_frame",
+    "operating_speed_mps": 0.3,
+    "ground_sample_stride_px": 6,
+    "ground_ransac_iterations": 160,
+    "ground_ransac_score_max_samples": 1200,
+    "ground_inlier_threshold_m": 0.008,
+    "ground_minimum_support": 500,
+    "ground_minimum_inlier_ratio": 0.70,
+    "ground_maximum_p90_residual_m": 0.008,
+    "ground_minimum_spatial_coverage": 0.35,
+    "ground_minimum_temporal_consistency": 0.20,
+    "ground_temporal_smoothing_factor": 0.35,
+    "geometry_sample_stride_px": 2,
+    "strong_height_m": 0.015,
+    "maximum_hazard_height_m": 0.15,
+    "strong_minimum_support_points": 18,
+    "strong_minimum_spatial_span_m": 0.04,
+    "geometry_cluster_cell_m": 0.04,
+    "depth_evidence_sample_stride_px": 1,
+    "weak_height_m": 0.006,
+    "weak_ground_noise_multiplier": 3.0,
+    "weak_minimum_support_points": 8,
+    "weak_minimum_spatial_span_m": 0.04,
+    "invalid_depth_minimum_pixels": 12,
+    "invalid_depth_minimum_span_px": 12.0,
+    "invalid_depth_maximum_width_px": 8.0,
+    "cable_local_contrast_threshold": 24.0,
+    "cable_maximum_half_width_px": 3,
+    "cable_minimum_component_pixels": 16,
+    "cable_minimum_length_px": 16.0,
+    "cable_minimum_apparent_width_px": 1.5,
+    "cable_maximum_apparent_width_px": 6.0,
+    "cable_minimum_width_consistency": 0.55,
+    "cable_minimum_curve_continuity": 0.80,
+    "cable_minimum_physical_span_m": 0.06,
+    "cable_maximum_ground_age_ms": 500.0,
+    "rgb_reorder_capacity": 16,
+    "association_radius_m": 0.08,
+    "confirmation_window_ms": 350.0,
+    "minimum_rgb_confirmation_confidence": 0.75,
+    "candidate_retention_ms": 500.0,
+    "confirmed_retention_ms": 2000.0
+  },
+  "resource_budget": {
+    "processing_p95_ms": 80.0,
+    "depth_geometry_average_cpu_cores": 1.0,
+    "soak_duration_seconds": 7200,
+    "maximum_input_queue_depth": 1,
+    "maximum_rgb_reorder_depth": 16,
+    "maximum_memory_growth_bytes": 33554432,
+    "measurement_window_samples": 256
+  }
+}

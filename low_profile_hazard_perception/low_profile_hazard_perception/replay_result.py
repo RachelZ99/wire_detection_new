@@ -13,9 +13,19 @@ TIMING_FIELD_SUFFIXES = (
 
 
 def is_timing_field(key: str) -> bool:
-    return any(
+    return (key.startswith("stage.") and key.endswith("_ms")) or any(
         key == suffix.removeprefix(".") or key.endswith(suffix)
         for suffix in TIMING_FIELD_SUFFIXES
+    )
+
+
+def is_volatile_field(key: str) -> bool:
+    """Fields measured from the host must not define replay determinism."""
+    return (
+        is_timing_field(key)
+        or key.startswith("resource.")
+        or key.startswith("stage.")
+        or key == "budget.runtime_reasons"
     )
 
 
@@ -52,7 +62,7 @@ class ReplayResultAccumulator:
         stable_values = {
             key: value
             for key, value in sorted(self._latest_values.items())
-            if not is_timing_field(key)
+            if not is_volatile_field(key)
         }
         timing_ranges = {
             key: {

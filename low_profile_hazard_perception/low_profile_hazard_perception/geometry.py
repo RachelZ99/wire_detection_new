@@ -8,7 +8,7 @@ scored as a metric 3-D plane; inverse depth is only a sparse fitting utility.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import acos, cos, floor, isfinite, radians, sqrt
+from math import acos, atan2, cos, degrees, floor, isfinite, radians, sqrt
 from typing import Sequence
 
 
@@ -115,6 +115,10 @@ class GroundEstimatorConfig:
     temporal_smoothing_factor: float = 0.35
     minimum_depth_m: float = 0.20
     maximum_depth_m: float = 4.0
+    minimum_profile_camera_height_m: float | None = None
+    maximum_profile_camera_height_m: float | None = None
+    minimum_profile_downward_pitch_degrees: float | None = None
+    maximum_profile_downward_pitch_degrees: float | None = None
 
     def __post_init__(self) -> None:
         if self.sample_stride_px < 1:
@@ -129,6 +133,31 @@ class GroundEstimatorConfig:
             raise ValueError("temporal_smoothing_factor must be in (0, 1]")
         if not 0.0 <= self.minimum_temporal_consistency <= 1.0:
             raise ValueError("minimum_temporal_consistency must be in [0, 1]")
+        if (
+            self.minimum_profile_camera_height_m is None
+        ) != (self.maximum_profile_camera_height_m is None):
+            raise ValueError("both profile camera-height limits are required")
+        if (
+            self.minimum_profile_camera_height_m is not None
+            and self.maximum_profile_camera_height_m is not None
+            and not (
+                0.0
+                < self.minimum_profile_camera_height_m
+                <= self.maximum_profile_camera_height_m
+            )
+        ):
+            raise ValueError("profile camera-height range is invalid")
+        if (
+            self.minimum_profile_downward_pitch_degrees is None
+        ) != (self.maximum_profile_downward_pitch_degrees is None):
+            raise ValueError("both profile camera-pitch limits are required")
+        if (
+            self.minimum_profile_downward_pitch_degrees is not None
+            and self.maximum_profile_downward_pitch_degrees is not None
+            and self.minimum_profile_downward_pitch_degrees
+            > self.maximum_profile_downward_pitch_degrees
+        ):
+            raise ValueError("profile camera-pitch range is invalid")
 
 
 @dataclass(frozen=True)
@@ -230,7 +259,7 @@ class GroundEstimator:
                 model.camera_height_m - nominal_camera_height_m
             ),
         )
-        reason = self._rejection_reason(metrics)
+        reason = self._rejection_reason(metrics, model)
         accepted = not reason
         if accepted:
             if self._previous is not None:
@@ -338,7 +367,9 @@ class GroundEstimator:
         )
         return angle, height, min(angle_score, height_score)
 
-    def _rejection_reason(self, metrics: GroundQualityMetrics) -> str:
+    def _rejection_reason(
+        self, metrics: GroundQualityMetrics, model: GroundPlane
+    ) -> str:
         if metrics.support_count < self.config.minimum_support:
             return "insufficient ground support"
         if metrics.inlier_ratio < self.config.minimum_inlier_ratio:
@@ -347,6 +378,29 @@ class GroundEstimator:
             return "ground residual is too large"
         if metrics.spatial_coverage < self.config.minimum_spatial_coverage:
             return "ground spatial coverage is too small"
+        if (
+            self.config.minimum_profile_camera_height_m is not None
+            and self.config.maximum_profile_camera_height_m is not None
+            and not (
+                self.config.minimum_profile_camera_height_m
+                <= model.camera_height_m
+                <= self.config.maximum_profile_camera_height_m
+            )
+        ):
+            return "observed camera height is outside detection profile"
+        downward_pitch_degrees = degrees(
+            atan2(-model.normal[2], -model.normal[1])
+        )
+        if (
+            self.config.minimum_profile_downward_pitch_degrees is not None
+            and self.config.maximum_profile_downward_pitch_degrees is not None
+            and not (
+                self.config.minimum_profile_downward_pitch_degrees
+                <= downward_pitch_degrees
+                <= self.config.maximum_profile_downward_pitch_degrees
+            )
+        ):
+            return "observed camera pitch is outside detection profile"
         if (
             metrics.temporal_consistency
             < self.config.minimum_temporal_consistency

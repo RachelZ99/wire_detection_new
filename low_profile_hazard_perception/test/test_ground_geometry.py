@@ -36,6 +36,77 @@ def _plane_depth_image(
 
 
 class ObservedGroundModelTests(unittest.TestCase):
+    def test_ground_outside_profile_installation_is_rejected(self) -> None:
+        intrinsics = CameraIntrinsics(
+            width=160,
+            height=90,
+            fx=114.0,
+            fy=114.0,
+            cx=80.0,
+            cy=45.0,
+        )
+        depth_mm = _plane_depth_image(
+            width=160,
+            height=90,
+            intrinsics=intrinsics,
+            camera_height_m=0.60,
+            downward_pitch_degrees=2.7,
+        )
+        estimator = GroundEstimator(
+            GroundEstimatorConfig(
+                sample_stride_px=3,
+                minimum_support=250,
+                minimum_inlier_ratio=0.7,
+                minimum_spatial_coverage=0.35,
+                minimum_profile_camera_height_m=0.20,
+                maximum_profile_camera_height_m=0.25,
+            )
+        )
+
+        estimate = estimator.estimate(
+            depth_mm,
+            intrinsics,
+            depth_unit_m=0.001,
+            nominal_camera_height_m=0.15,
+        )
+
+        self.assertFalse(estimate.accepted)
+        self.assertEqual(
+            estimate.reason,
+            "observed camera height is outside detection profile",
+        )
+
+        pitched_depth_mm = _plane_depth_image(
+            width=160,
+            height=90,
+            intrinsics=intrinsics,
+            camera_height_m=0.225,
+            downward_pitch_degrees=8.0,
+        )
+        pitch_estimator = GroundEstimator(
+            GroundEstimatorConfig(
+                sample_stride_px=3,
+                minimum_support=250,
+                minimum_inlier_ratio=0.7,
+                minimum_spatial_coverage=0.35,
+                minimum_profile_camera_height_m=0.20,
+                maximum_profile_camera_height_m=0.25,
+                minimum_profile_downward_pitch_degrees=1.5,
+                maximum_profile_downward_pitch_degrees=4.0,
+            )
+        )
+        pitched = pitch_estimator.estimate(
+            pitched_depth_mm,
+            intrinsics,
+            depth_unit_m=0.001,
+            nominal_camera_height_m=0.15,
+        )
+        self.assertFalse(pitched.accepted)
+        self.assertEqual(
+            pitched.reason,
+            "observed camera pitch is outside detection profile",
+        )
+
     def test_floor_ray_intersection_projects_a_pixel_without_depth(self) -> None:
         intrinsics = CameraIntrinsics(
             width=160,

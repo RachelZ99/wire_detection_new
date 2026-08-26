@@ -15,7 +15,10 @@ setup(
             ["resource/" + package_name],
         ),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/config", glob("config/*.yaml")),
+        (
+            "share/" + package_name + "/config",
+            glob("config/*.yaml") + glob("config/*.json"),
+        ),
         ("share/" + package_name + "/launch", glob("launch/*.launch.py")),
     ],
     install_requires=["setuptools"],
@@ -36,6 +39,8 @@ setup(
             "low_profile_hazard_perception.geometric_replay:main",
             "replay_rgb_cable = "
             "low_profile_hazard_perception.geometric_replay:main_rgb_cable",
+            "soak_detection_profile = "
+            "low_profile_hazard_perception.profile_soak:main",
         ],
     },
 )

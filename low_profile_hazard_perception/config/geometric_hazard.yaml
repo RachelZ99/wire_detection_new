@@ -6,6 +6,8 @@ geometric_hazard:
     receive_stale_after_ms: 500.0
     health_publish_period_ms: 200.0
     input_processing_period_ms: 5.0
+    # This initial formal profile is valid only at or below 0.3 m/s.
+    operating_speed_mps: 0.3
     camera_frame: camera_1_color_optical_frame
     base_frame: base_footprint
     color_image_topic: /camera_1/color/image_raw
@@ -19,6 +21,8 @@ geometric_hazard:
     hazard_cloud_topic: /low_profile_hazard_perception/confirmed_hazards
     candidate_diagnostics_topic: /low_profile_hazard_perception/candidate_diagnostics
 
+    # These launch values are bound to the versioned JSON detection profile.
+    # Any drift requires a new profile; startup rejects silent overrides.
     # Observed-ground profile for the measured 640x360 DCW2 stream.
     ground_sample_stride_px: 6
     ground_ransac_iterations: 160

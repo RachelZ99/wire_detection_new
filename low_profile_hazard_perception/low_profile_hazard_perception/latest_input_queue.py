@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
 from threading import Lock
 from typing import Generic, TypeVar
 
 
 Item = TypeVar("Item")
+_MAXIMUM_STAMP_REORDER_NS = 500_000_000
 
 
 class LatestInputQueue(Generic[Item]):
@@ -18,9 +20,7 @@ class LatestInputQueue(Generic[Item]):
         self._received_count = 0
         self._processed_count = 0
         self._drop_count = 0
-        self._first_sensor_stamp_ns: int | None = None
-        self._last_sensor_stamp_ns: int | None = None
-        self._stamped_count = 0
+        self._sensor_stamp_window: deque[int] = deque(maxlen=32)
 
     def offer(self, item: Item, *, sensor_stamp_ns: int | None = None) -> bool:
         """Offer work, returning true when pending work was dropped."""
@@ -30,10 +30,13 @@ class LatestInputQueue(Generic[Item]):
             self._drop_count += int(dropped)
             self._item = item
             if sensor_stamp_ns is not None:
-                if self._first_sensor_stamp_ns is None:
-                    self._first_sensor_stamp_ns = sensor_stamp_ns
-                self._last_sensor_stamp_ns = sensor_stamp_ns
-                self._stamped_count += 1
+                if (
+                    self._sensor_stamp_window
+                    and sensor_stamp_ns
+                    < max(self._sensor_stamp_window) - _MAXIMUM_STAMP_REORDER_NS
+                ):
+                    self._sensor_stamp_window.clear()
+                self._sensor_stamp_window.append(sensor_stamp_ns)
             return dropped
 
     def take(self) -> Item | None:
@@ -60,17 +63,21 @@ class LatestInputQueue(Generic[Item]):
             return self._drop_count
 
     @property
+    def pending_count(self) -> int:
+        with self._lock:
+            return int(self._item is not None)
+
+    @property
     def approximate_received_rate_hz(self) -> float | None:
         with self._lock:
-            if (
-                self._stamped_count < 2
-                or self._first_sensor_stamp_ns is None
-                or self._last_sensor_stamp_ns is None
-                or self._last_sensor_stamp_ns <= self._first_sensor_stamp_ns
-            ):
+            stamps = sorted(set(self._sensor_stamp_window))
+            if len(stamps) < 2 or stamps[-1] <= stamps[0]:
                 return None
             return (
-                (self._stamped_count - 1)
-                * 1_000_000_000
-                / (self._last_sensor_stamp_ns - self._first_sensor_stamp_ns)
+                (len(stamps) - 1) * 1_000_000_000 / (stamps[-1] - stamps[0])
             )
+
+    @property
+    def stamped_window_count(self) -> int:
+        with self._lock:
+            return len(set(self._sensor_stamp_window))

@@ -41,7 +41,12 @@ from .health import (
     TransformBatchObservation,
     validate_transform_batch,
 )
+from .detection_profile import (
+    DetectionProfile,
+    default_detection_profile_path,
+)
 from .latest_input_queue import LatestInputQueue
+from .resource_budget import ProcessResourceMonitor
 
 
 def _stamp_ns(stamp: object) -> int:
@@ -61,8 +66,22 @@ def _text(value: object) -> str:
 class InputHealthNode(Node):
     """Validate independent input streams and publish observable health."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, bind_detection_profile: bool = False) -> None:
         super().__init__("input_health")
+        self._detection_profile: DetectionProfile | None = None
+        self._operating_speed_mps: float | None = None
+        if bind_detection_profile:
+            profile_path = str(
+                self.declare_parameter(
+                    "detection_profile_path",
+                    str(default_detection_profile_path()),
+                ).value
+            )
+            self._detection_profile = DetectionProfile.load(profile_path)
+            self._operating_speed_mps = float(
+                self.declare_parameter("operating_speed_mps", 0.3).value
+            )
+            self._detection_profile.validate_speed(self._operating_speed_mps)
         expected_width = self.declare_parameter("expected_width", 640).value
         expected_height = self.declare_parameter("expected_height", 360).value
         sensor_stale_ms = self.declare_parameter(
@@ -83,6 +102,17 @@ class InputHealthNode(Node):
         self._base_frame = self.declare_parameter(
             "base_frame", "base_footprint"
         ).value
+        if self._detection_profile is not None:
+            profile_runtime = {
+                    "expected_width": expected_width,
+                    "expected_height": expected_height,
+                    "camera_frame": self._camera_frame,
+                    "operating_speed_mps": self._operating_speed_mps,
+            }
+            self._detection_profile.validate_parameters(
+                profile_runtime,
+                names=tuple(profile_runtime),
+            )
         self._monitor = HealthMonitor(
             expected_width=int(expected_width),
             expected_height=int(expected_height),
@@ -96,6 +126,15 @@ class InputHealthNode(Node):
             Stream, LatestInputQueue[Callable[[], int]]
         ] = {stream: LatestInputQueue() for stream in Stream}
         self._steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self._resource_monitor = ProcessResourceMonitor(
+            capacity=720,
+            npu_state=(
+                "disabled_rule_profile"
+                if self._detection_profile is not None
+                and self._detection_profile.model_version == "none"
+                else "not_configured"
+            ),
+        )
 
         health_topic = self.declare_parameter(
             "health_topic", "/low_profile_hazard_perception/health"
@@ -492,6 +531,81 @@ class InputHealthNode(Node):
                 self._operational_hazard_output_enabled()
             ),
         }
+        values.update(self._resource_monitor.sample().diagnostic_values())
+        if self._detection_profile is not None:
+            profile = self._detection_profile
+            values.update(
+                {
+                    "profile.id": profile.profile_id,
+                    "profile.schema_version": profile.schema_version,
+                    "profile.fingerprint": profile.fingerprint,
+                    "profile.validation_phase": profile.validation_phase,
+                    "profile.image": profile.camera.image_profile,
+                    "profile.minimum_rate_hz": (
+                        profile.camera.validated_rate_range_hz[0]
+                    ),
+                    "profile.maximum_rate_hz": (
+                        profile.camera.validated_rate_range_hz[1]
+                    ),
+                    "profile.rgb_encoding": profile.camera.rgb_encoding,
+                    "profile.depth_encoding": profile.camera.depth_encoding,
+                    "profile.camera_frame": profile.camera.frame_id,
+                    "profile.observed_camera_height_m": (
+                        profile.observed_camera_height_m
+                    ),
+                    "profile.minimum_camera_height_m": (
+                        profile.validated_height_range_m[0]
+                    ),
+                    "profile.maximum_camera_height_m": (
+                        profile.validated_height_range_m[1]
+                    ),
+                    "profile.observed_downward_pitch_degrees": (
+                        profile.observed_downward_pitch_degrees
+                    ),
+                    "profile.minimum_downward_pitch_degrees": (
+                        profile.validated_downward_pitch_range_degrees[0]
+                    ),
+                    "profile.maximum_downward_pitch_degrees": (
+                        profile.validated_downward_pitch_range_degrees[1]
+                    ),
+                    "profile.footprint_minimum_x_m": (
+                        profile.footprint_m["minimum_x"]
+                    ),
+                    "profile.footprint_maximum_x_m": (
+                        profile.footprint_m["maximum_x"]
+                    ),
+                    "profile.footprint_minimum_y_m": (
+                        profile.footprint_m["minimum_y"]
+                    ),
+                    "profile.footprint_maximum_y_m": (
+                        profile.footprint_m["maximum_y"]
+                    ),
+                    "profile.rule_version": profile.rule_version,
+                    "profile.model_version": profile.model_version,
+                    "profile.maximum_speed_mps": profile.maximum_speed_mps,
+                    "profile.configured_operating_speed_mps": (
+                        self._operating_speed_mps
+                    ),
+                    "budget.processing_p95_ms": (
+                        profile.resource_budget.processing_p95_ms
+                    ),
+                    "budget.depth_geometry_average_cpu_cores": (
+                        profile.resource_budget.depth_geometry_average_cpu_cores
+                    ),
+                    "budget.soak_duration_seconds": (
+                        profile.resource_budget.soak_duration_seconds
+                    ),
+                    "budget.maximum_input_queue_depth": (
+                        profile.resource_budget.maximum_input_queue_depth
+                    ),
+                    "budget.maximum_rgb_reorder_depth": (
+                        profile.resource_budget.maximum_rgb_reorder_depth
+                    ),
+                    "budget.maximum_memory_growth_bytes": (
+                        profile.resource_budget.maximum_memory_growth_bytes
+                    ),
+                }
+            )
         values.update(self._additional_health_values())
         for stream, health in snapshot.streams.items():
             prefix = stream.value
@@ -500,6 +614,7 @@ class InputHealthNode(Node):
                 {
                     f"{prefix}.delivered_count": queue.received_count,
                     f"{prefix}.processed_count": queue.processed_count,
+                    f"{prefix}.pending_count": queue.pending_count,
                     f"{prefix}.valid_count": health.valid_count,
                     f"{prefix}.invalid_count": health.invalid_count,
                     f"{prefix}.queue_drops": health.queue_drops,

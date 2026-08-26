@@ -5,7 +5,10 @@ from __future__ import annotations
 import math
 import struct
 import sys
+import time
 from array import array
+from collections.abc import Callable
+from typing import TypeVar
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -22,6 +25,7 @@ from tf2_msgs.msg import TFMessage
 
 from .cable import DiagnosticPinkConfig, TrainingFreeCableConfig
 from .depth_evidence import DepthEvidenceConfig
+from .detection_profile import ProfileBindingState, ProfileMismatch
 from .geometric_pipeline import CandidateReport, GeometricHazardPipeline
 from .geometry import (
     CameraIntrinsics,
@@ -41,6 +45,7 @@ from .health import (
     rgb_projection_support_reason,
 )
 from .node import InputHealthNode, _stamp_ns
+from .resource_budget import StageMetrics
 from .temporal import (
     ConfirmedHazard,
     EvidenceMask,
@@ -50,14 +55,22 @@ from .temporal import (
 )
 
 
+StageResult = TypeVar("StageResult")
+
+
 class GeometricHazardNode(InputHealthNode):
     """Carry supported low-profile hazards through odom to PointCloud2."""
 
     def __init__(self) -> None:
         self._pipeline = GeometricHazardPipeline()
-        self._pending_depth: tuple[int, tuple[int, ...]] | None = None
-        self._pending_rgb: list[tuple[int, bytes]] = []
+        self._pending_depth: tuple[int, int, tuple[int, ...]] | None = None
+        self._pending_rgb: list[tuple[int, int, bytes]] = []
         self._rgb_reorder_capacity = 16
+        self._depth_stage_metrics = StageMetrics(capacity=256)
+        self._rgb_stage_metrics = StageMetrics(capacity=256)
+        self._perception_stage_metrics = StageMetrics(capacity=256)
+        self._profile_binding = ProfileBindingState()
+        self._latest_observed_speed_mps = 0.0
         self._last_ground: GroundEstimate | None = None
         self._last_nominal_ground_angle_error_degrees: float | None = None
         self._last_candidate_count = 0
@@ -78,7 +91,16 @@ class GeometricHazardNode(InputHealthNode):
         self._last_published_retained_signature: tuple[object, ...] = ()
         self._had_operational_hazard_output = False
         self._active_retained_count = 0
-        super().__init__()
+        self._diagnostic_pink_enabled = False
+        super().__init__(bind_detection_profile=True)
+
+        assert self._detection_profile is not None
+        metric_capacity = (
+            self._detection_profile.resource_budget.measurement_window_samples
+        )
+        self._depth_stage_metrics = StageMetrics(capacity=metric_capacity)
+        self._rgb_stage_metrics = StageMetrics(capacity=metric_capacity)
+        self._perception_stage_metrics = StageMetrics(capacity=metric_capacity)
 
         self._rgb_reorder_capacity = int(
             self.declare_parameter("rgb_reorder_capacity", 16).value
@@ -142,6 +164,18 @@ class GeometricHazardNode(InputHealthNode):
             ),
             temporal_smoothing_factor=float(
                 self.declare_parameter("ground_temporal_smoothing_factor", 0.35).value
+            ),
+            minimum_profile_camera_height_m=(
+                self._detection_profile.validated_height_range_m[0]
+            ),
+            maximum_profile_camera_height_m=(
+                self._detection_profile.validated_height_range_m[1]
+            ),
+            minimum_profile_downward_pitch_degrees=(
+                self._detection_profile.validated_downward_pitch_range_degrees[0]
+            ),
+            maximum_profile_downward_pitch_degrees=(
+                self._detection_profile.validated_downward_pitch_range_degrees[1]
             ),
         )
         geometry_config = StrongGeometryConfig(
@@ -256,6 +290,11 @@ class GeometricHazardNode(InputHealthNode):
             cable_config=cable_config,
             tracker_config=tracker_config,
         )
+        profile_runtime = {
+            name: self.get_parameter(name).value
+            for name in self._detection_profile.parameters
+        }
+        self._detection_profile.validate_parameters(profile_runtime)
         cloud_topic = str(
             self.declare_parameter(
                 "hazard_cloud_topic",
@@ -347,6 +386,19 @@ class GeometricHazardNode(InputHealthNode):
         ):
             self._block_new_confirmation("odom:invalid")
             return
+        twist = message.twist.twist.linear
+        speed_mps = math.hypot(twist.x, twist.y)
+        self._latest_observed_speed_mps = speed_mps
+        assert self._detection_profile is not None
+        try:
+            self._detection_profile.validate_speed(speed_mps)
+        except ProfileMismatch as error:
+            self._profile_binding.set("profile:speed_exceeded", active=True)
+            self._pipeline.suspend_confirmed_expiry()
+            self._drop_pending_image_work()
+            self.get_logger().warning(str(error))
+        else:
+            self._profile_binding.set("profile:speed_exceeded", active=False)
         pose = message.pose.pose
         try:
             reason = self._pipeline.add_odom(
@@ -423,6 +475,32 @@ class GeometricHazardNode(InputHealthNode):
         message: Image,
         observation: ImageObservation,
     ) -> None:
+        assert self._detection_profile is not None
+        image_mismatch = f"profile:{stream.value}_mismatch"
+        try:
+            self._detection_profile.validate_image(
+                width=observation.width,
+                height=observation.height,
+                encoding=observation.encoding,
+                is_depth=stream is Stream.DEPTH_IMAGE,
+            )
+        except ProfileMismatch as error:
+            self._profile_binding.set(image_mismatch, active=True)
+            self._block_new_confirmation(image_mismatch)
+            self.get_logger().warning(str(error))
+            return
+        self._profile_binding.set(image_mismatch, active=False)
+        rate_mismatch = self._validate_image_rate(stream)
+        if rate_mismatch:
+            self._block_new_confirmation(rate_mismatch)
+            return
+        if "profile:speed_exceeded" in self._profile_binding.reasons:
+            if stream is Stream.COLOR_IMAGE:
+                self._pending_rgb_drop_count += 1
+            elif stream is Stream.DEPTH_IMAGE:
+                self._pending_depth_drop_count += 1
+            self._block_new_confirmation("profile:speed_exceeded")
+            return
         if stream is Stream.COLOR_IMAGE:
             if (
                 observation.sensor_stamp_ns <= 0
@@ -441,7 +519,7 @@ class GeometricHazardNode(InputHealthNode):
             duplicate_index = next(
                 (
                     index
-                    for index, (stamp_ns, _) in enumerate(self._pending_rgb)
+                    for index, (stamp_ns, _, _) in enumerate(self._pending_rgb)
                     if stamp_ns == observation.sensor_stamp_ns
                 ),
                 None,
@@ -449,7 +527,9 @@ class GeometricHazardNode(InputHealthNode):
             if duplicate_index is not None:
                 self._pending_rgb.pop(duplicate_index)
                 self._pending_rgb_drop_count += 1
-            self._pending_rgb.append((observation.sensor_stamp_ns, values))
+            self._pending_rgb.append(
+                (observation.sensor_stamp_ns, observation.receive_time_ns, values)
+            )
             self._pending_rgb.sort(key=lambda item: item[0])
             while len(self._pending_rgb) > self._rgb_reorder_capacity:
                 self._pending_rgb.pop(0)
@@ -475,13 +555,21 @@ class GeometricHazardNode(InputHealthNode):
             return
         if self._pending_depth is not None:
             self._pending_depth_drop_count += 1
-        self._pending_depth = (observation.sensor_stamp_ns, values)
+        self._pending_depth = (
+            observation.sensor_stamp_ns,
+            observation.receive_time_ns,
+            values,
+        )
         self._try_process_pending_depth()
 
     def _try_process_pending_depth(self) -> None:
         if self._pending_depth is None:
             return
-        stamp_ns, values = self._pending_depth
+        stamp_ns, receive_time_ns, values = self._pending_depth
+        blocking_profile_reason = self._blocking_profile_reason()
+        if blocking_profile_reason:
+            self._block_new_confirmation(blocking_profile_reason)
+            return
         snapshot = self._snapshot()
         projection_reason = geometric_projection_support_reason(snapshot)
         if projection_reason:
@@ -494,7 +582,12 @@ class GeometricHazardNode(InputHealthNode):
             self._publish_health()
             return
         self._pending_depth = None
-        result = self._pipeline.process_depth(stamp_ns, values)
+        result = self._measure_stage(
+            self._depth_stage_metrics,
+            sensor_stamp_ns=stamp_ns,
+            receive_time_ns=receive_time_ns,
+            work=lambda: self._pipeline.process_depth(stamp_ns, values),
+        )
         if result is None:
             self._geometric_degradation_reason = (
                 self._pipeline.alignment_reason or "odom:missing"
@@ -505,6 +598,23 @@ class GeometricHazardNode(InputHealthNode):
         self._processed_depth_count += 1
         self._latest_processed_depth_stamp_ns = stamp_ns
         self._last_ground = result.ground
+        if (
+            result.ground.reason
+            == "observed camera height is outside detection profile"
+        ):
+            self._profile_binding.set(
+                "profile:camera_installation_mismatch", active=True
+            )
+        elif result.ground.reason == (
+            "observed camera pitch is outside detection profile"
+        ):
+            self._profile_binding.set(
+                "profile:camera_installation_mismatch", active=True
+            )
+        elif result.ground.accepted:
+            self._profile_binding.set(
+                "profile:camera_installation_mismatch", active=False
+            )
         self._last_nominal_ground_angle_error_degrees = (
             result.nominal_ground_angle_error_degrees
         )
@@ -521,7 +631,11 @@ class GeometricHazardNode(InputHealthNode):
 
     def _try_process_pending_rgb(self) -> None:
         while self._pending_rgb:
-            stamp_ns, values = self._pending_rgb[0]
+            stamp_ns, receive_time_ns, values = self._pending_rgb[0]
+            blocking_profile_reason = self._blocking_profile_reason()
+            if blocking_profile_reason:
+                self._block_new_confirmation(blocking_profile_reason)
+                return
             projection_reason = rgb_projection_support_reason(self._snapshot())
             if projection_reason:
                 self._block_new_confirmation(projection_reason)
@@ -532,7 +646,12 @@ class GeometricHazardNode(InputHealthNode):
                 )
                 self._publish_health()
                 return
-            result = self._pipeline.process_rgb(stamp_ns, values)
+            result = self._measure_stage(
+                self._rgb_stage_metrics,
+                sensor_stamp_ns=stamp_ns,
+                receive_time_ns=receive_time_ns,
+                work=lambda: self._pipeline.process_rgb(stamp_ns, values),
+            )
             if result is None:
                 self._geometric_degradation_reason = (
                     self._pipeline.rgb_projection_reason or "ground:unavailable"
@@ -568,6 +687,70 @@ class GeometricHazardNode(InputHealthNode):
             self._publish_candidate_reports(result.candidate_reports)
             self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
             self._publish_health()
+
+    def _measure_stage(
+        self,
+        stage: StageMetrics,
+        *,
+        sensor_stamp_ns: int,
+        receive_time_ns: int,
+        work: Callable[[], StageResult],
+    ) -> StageResult:
+        started_monotonic_ns = time.monotonic_ns()
+        started_cpu_ns = time.process_time_ns()
+        result = work()
+        completed_monotonic_ns = time.monotonic_ns()
+        cpu_time_ns = time.process_time_ns() - started_cpu_ns
+        queue_wait_ms = max(
+            0.0, (started_monotonic_ns - receive_time_ns) / 1_000_000
+        )
+        message_age_ms = (
+            self.get_clock().now().nanoseconds - sensor_stamp_ns
+        ) / 1_000_000
+        values = {
+            "started_monotonic_ns": started_monotonic_ns,
+            "completed_monotonic_ns": completed_monotonic_ns,
+            "cpu_time_ns": cpu_time_ns,
+            "queue_wait_ms": queue_wait_ms,
+            "message_age_ms": message_age_ms,
+        }
+        stage.record(**values)
+        self._perception_stage_metrics.record(**values)
+        return result
+
+    def _validate_image_rate(self, stream: Stream) -> str:
+        if stream not in (Stream.COLOR_IMAGE, Stream.DEPTH_IMAGE):
+            return ""
+        mismatch = f"profile:{stream.value}_rate_mismatch"
+        delivered = self._input_queues[stream]
+        rate_hz = delivered.approximate_received_rate_hz
+        if delivered.stamped_window_count < 5 or rate_hz is None:
+            return ""
+        assert self._detection_profile is not None
+        try:
+            self._detection_profile.validate_rate(rate_hz)
+        except ProfileMismatch as error:
+            self._profile_binding.set(mismatch, active=True)
+            self.get_logger().warning(str(error))
+            return mismatch
+        self._profile_binding.set(mismatch, active=False)
+        return ""
+
+    def _blocking_profile_reason(self) -> str:
+        return self._profile_binding.blocking_reason(
+            excluding=("profile:camera_installation_mismatch",)
+        )
+
+    def _drop_pending_image_work(self) -> None:
+        if self._pending_depth is not None:
+            self._pending_depth = None
+            self._pending_depth_drop_count += 1
+        if self._pending_rgb:
+            self._pending_rgb_drop_count += len(self._pending_rgb)
+            self._pending_rgb.clear()
+
+    def _profile_mismatch_reason(self) -> str:
+        return self._profile_binding.reason_text
 
     def _block_new_confirmation(self, reason: str) -> None:
         self._pipeline.suspend_confirmed_expiry()
@@ -635,22 +818,48 @@ class GeometricHazardNode(InputHealthNode):
         return True
 
     def _effective_health_state(self, snapshot: HealthSnapshot) -> HealthState:
-        if snapshot.state is HealthState.INVALID:
+        if snapshot.state is HealthState.INVALID or self._profile_binding.mismatched:
             return HealthState.INVALID
-        if self._geometric_degradation_reason or (
+        if self._geometric_degradation_reason or self._budget_reasons() or (
             self._last_ground is not None and not self._last_ground.accepted
         ):
             return HealthState.DEGRADED
         return snapshot.state
 
     def _additional_health_reasons(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self._profile_binding.mismatched:
+            reasons.extend(self._profile_binding.reasons)
         if self._geometric_degradation_reason:
-            return (self._geometric_degradation_reason,)
-        if self._last_ground is None or self._last_ground.accepted:
+            reasons.append(self._geometric_degradation_reason)
+        elif self._last_ground is not None and not self._last_ground.accepted:
+            reasons.append(f"ground:{self._last_ground.reason}")
+        reasons.extend(self._budget_reasons())
+        return tuple(dict.fromkeys(reasons))
+
+    def _budget_reasons(self) -> tuple[str, ...]:
+        assert self._detection_profile is not None
+        perception = self._perception_stage_metrics.snapshot()
+        depth = self._depth_stage_metrics.snapshot()
+        if perception.sample_count < 20 or depth.sample_count < 10:
             return ()
-        return (f"ground:{self._last_ground.reason}",)
+        reasons: list[str] = []
+        if (
+            perception.processing_wall_p95_ms is not None
+            and perception.processing_wall_p95_ms
+            > self._detection_profile.resource_budget.processing_p95_ms
+        ):
+            reasons.append("budget:processing_p95_exceeded")
+        if (
+            depth.average_cpu_cores is not None
+            and depth.average_cpu_cores
+            > self._detection_profile.resource_budget.depth_geometry_average_cpu_cores
+        ):
+            reasons.append("budget:depth_cpu_exceeded")
+        return tuple(reasons)
 
     def _additional_health_values(self) -> dict[str, object]:
+        assert self._detection_profile is not None
         if self._last_ground is None:
             ground: dict[str, object] = {
                 "ground.state": "UNAVAILABLE",
@@ -677,6 +886,18 @@ class GeometricHazardNode(InputHealthNode):
             }
         ground.update(
             {
+                "profile.binding_state": (
+                    "MISMATCH" if self._profile_binding.mismatched else "BOUND"
+                ),
+                "profile.mismatch_reason": self._profile_mismatch_reason(),
+                "profile.latest_observed_speed_mps": (
+                    self._latest_observed_speed_mps
+                ),
+                "budget.runtime_reasons": ",".join(self._budget_reasons()),
+                "queue.maximum_input_work_depth": 1,
+                "queue.pending_depth_count": int(self._pending_depth is not None),
+                "queue.pending_rgb_reorder_count": len(self._pending_rgb),
+                "queue.rgb_reorder_capacity": self._rgb_reorder_capacity,
                 "geometry.latest_candidate_count": self._last_candidate_count,
                 "geometry.confirmed_observation_count": (
                     self._confirmed_observation_count
@@ -739,6 +960,21 @@ class GeometricHazardNode(InputHealthNode):
                     self._pipeline.odom.maximum_rotation_jump_degrees
                 ),
             }
+        )
+        ground.update(
+            self._depth_stage_metrics.snapshot().diagnostic_values(
+                "stage.depth_geometry"
+            )
+        )
+        ground.update(
+            self._rgb_stage_metrics.snapshot().diagnostic_values(
+                "stage.rgb_cable"
+            )
+        )
+        ground.update(
+            self._perception_stage_metrics.snapshot().diagnostic_values(
+                "stage.perception"
+            )
         )
         return ground
 
