@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "low-profile-hazard-perception/home-regression-scene-result-v1",
+  "title": "Home regression scene result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scene_id",
+    "bag_id",
+    "bag_sha256",
+    "profile_id",
+    "profile_fingerprint",
+    "rule_version",
+    "deterministic",
+    "repeat_count",
+    "evaluated_duration_seconds",
+    "observed_maximum_speed_mps",
+    "event_outcomes",
+    "persistent_false_events",
+    "health_failures",
+    "resource_use"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "scene_id": {"type": "string", "minLength": 1},
+    "bag_id": {"type": "string", "minLength": 1},
+    "bag_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "profile_id": {"type": "string", "minLength": 1},
+    "profile_fingerprint": {"type": "string", "minLength": 1},
+    "rule_version": {"type": "string", "minLength": 1},
+    "deterministic": {"const": true},
+    "repeat_count": {"type": "integer", "minimum": 2},
+    "evaluated_duration_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "observed_maximum_speed_mps": {"type": "number", "minimum": 0},
+    "event_outcomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "detected",
+          "confirmed_detection_distance_m",
+          "confirmation_latency_ms",
+          "failure_class"
+        ],
+        "properties": {
+          "event_id": {"type": "string", "minLength": 1},
+          "detected": {"type": "boolean"},
+          "confirmed_detection_distance_m": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "confirmation_latency_ms": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "failure_class": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "persistent_false_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["event_id", "failure_class", "duration_seconds"],
+        "properties": {
+          "event_id": {"type": "string", "minLength": 1},
+          "failure_class": {"type": "string", "minLength": 1},
+          "duration_seconds": {"type": "number", "exclusiveMinimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "health_failures": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "resource_use": {
+      "type": "object",
+      "required": [
+        "processing_p95_ms",
+        "depth_geometry_average_cpu_cores",
+        "memory_growth_bytes",
+        "maximum_pending_work"
+      ],
+      "properties": {
+        "processing_p95_ms": {"type": "number", "minimum": 0},
+        "depth_geometry_average_cpu_cores": {
+          "type": "number",
+          "minimum": 0
+        },
+        "memory_growth_bytes": {"type": "integer", "minimum": 0},
+        "maximum_pending_work": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

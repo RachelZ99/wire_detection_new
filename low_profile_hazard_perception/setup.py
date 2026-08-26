@@ -41,6 +41,8 @@ setup(
             "low_profile_hazard_perception.geometric_replay:main_rgb_cable",
             "soak_detection_profile = "
             "low_profile_hazard_perception.profile_soak:main",
+            "audit_home_regression = "
+            "low_profile_hazard_perception.home_regression:main",
         ],
     },
 )

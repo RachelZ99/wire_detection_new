@@ -1,0 +1,356 @@
+{
+  "schema_version": 1,
+  "suite_id": "dcw2-home-rule-regression-v1",
+  "validation_phase": "home_feasibility",
+  "profile_id": "dcw2-home-640x360-v1",
+  "profile_fingerprint": "640dc4f70cf0bf3297179401df7e65e4d0f8ecca2429ea51ea51d98157bad7a2",
+  "rule_version": "training-free-thin-line-v1",
+  "required_full_speed_mps": 0.3,
+  "full_speed_tolerance_mps": 0.01,
+  "maximum_validated_speed_mps": 0.3,
+  "thresholds": {
+    "minimum_event_recall": {
+      "cable": 1.0,
+      "obvious_protrusion": 1.0
+    },
+    "maximum_persistent_false_events": 0,
+    "maximum_confirmation_latency_ms": 350.0,
+    "maximum_health_failures": 0,
+    "maximum_processing_p95_ms": 80.0,
+    "maximum_depth_geometry_average_cpu_cores": 1.0,
+    "maximum_memory_growth_bytes": 33554432,
+    "maximum_pending_work": 1
+  },
+  "required_acceptance_coverage": {
+    "hazard_layout": [
+      "straight",
+      "curved",
+      "crossing",
+      "partial_occlusion",
+      "raised"
+    ],
+    "hazard_kind": ["cable", "obvious_protrusion"],
+    "hazard_form": ["cable", "power_strip", "plug", "raised_section"],
+    "cable_appearance": [
+      "pink_rubber",
+      "white_pvc",
+      "black_rubber",
+      "gray_braided"
+    ],
+    "negative_class": [
+      "reflection",
+      "shadow",
+      "floor_seam",
+      "scratch",
+      "tape",
+      "furniture_leg",
+      "mat_edge",
+      "empty_floor"
+    ],
+    "distance": ["near", "middle", "far"],
+    "floor": ["reflective_tile", "matte_tile", "wood"],
+    "light": ["indoor_diffuse", "side_light", "strong_reflection"],
+    "robot_motion": ["stationary", "straight", "turning"],
+    "depth_validity": ["mostly_valid", "cable_invalid", "mixed_invalid"]
+  },
+  "npu_eligible_failure_classes": [
+    "low_contrast_cable",
+    "cable_color_or_material_transfer",
+    "curved_or_crossing_cable_fragmentation",
+    "partial_occlusion_cable_fragmentation",
+    "raised_cable_rgb_miss",
+    "reflection_cable_confusion",
+    "shadow_cable_confusion",
+    "floor_seam_cable_confusion",
+    "scratch_cable_confusion",
+    "tape_cable_confusion",
+    "furniture_edge_cable_confusion",
+    "mat_edge_cable_confusion"
+  ],
+  "scenes": [
+    {
+      "scene_id": "tune-reference-pale-cable-power-strip",
+      "scene_group_id": "video-tune-reference-01",
+      "split": "tuning",
+      "bag_id": "wire_rgbd_strip_01",
+      "duration_seconds": 30.0,
+      "maximum_speed_mps": 0.14,
+      "strata": {
+        "hazard_layout": ["straight"],
+        "hazard_kind": ["cable", "obvious_protrusion"],
+        "hazard_form": ["cable", "power_strip"],
+        "cable_appearance": ["pink_rubber"],
+        "negative_class": ["reflection"],
+        "distance": "middle",
+        "floor": "reflective_tile",
+        "light": "indoor_diffuse",
+        "robot_motion": "straight",
+        "depth_validity": "mixed_invalid"
+      },
+      "expected_events": [
+        {
+          "event_id": "tune-pale-cable",
+          "hazard_kind": "cable",
+          "cable_appearance": "pink_rubber"
+        },
+        {"event_id": "tune-power-strip", "hazard_kind": "obvious_protrusion"}
+      ],
+      "result_file": "tune-reference-pale-cable-power-strip.json"
+    },
+    {
+      "scene_id": "tune-white-cable",
+      "scene_group_id": "video-tune-white-01",
+      "split": "tuning",
+      "bag_id": "home_tune_white_cable_01",
+      "duration_seconds": 20.0,
+      "maximum_speed_mps": 0.1,
+      "strata": {
+        "hazard_layout": ["curved"],
+        "hazard_kind": ["cable"],
+        "hazard_form": ["cable"],
+        "cable_appearance": ["white_pvc"],
+        "negative_class": [],
+        "distance": "near",
+        "floor": "matte_tile",
+        "light": "indoor_diffuse",
+        "robot_motion": "stationary",
+        "depth_validity": "cable_invalid"
+      },
+      "expected_events": [
+        {
+          "event_id": "tune-white-curved",
+          "hazard_kind": "cable",
+          "cable_appearance": "white_pvc"
+        }
+      ],
+      "result_file": "tune-white-cable.json"
+    },
+    {
+      "scene_id": "accept-multicolor-straight-full-speed",
+      "scene_group_id": "video-accept-multicolor-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_multicolor_straight_03mps_01",
+      "duration_seconds": 40.0,
+      "maximum_speed_mps": 0.3,
+      "strata": {
+        "hazard_layout": ["straight"],
+        "hazard_kind": ["cable"],
+        "hazard_form": ["cable"],
+        "cable_appearance": [
+          "pink_rubber",
+          "white_pvc",
+          "black_rubber",
+          "gray_braided"
+        ],
+        "negative_class": [],
+        "distance": "far",
+        "floor": "matte_tile",
+        "light": "indoor_diffuse",
+        "robot_motion": "straight",
+        "depth_validity": "mixed_invalid"
+      },
+      "expected_events": [
+        {
+          "event_id": "pink-straight",
+          "hazard_kind": "cable",
+          "cable_appearance": "pink_rubber"
+        },
+        {
+          "event_id": "white-straight",
+          "hazard_kind": "cable",
+          "cable_appearance": "white_pvc"
+        },
+        {
+          "event_id": "black-straight",
+          "hazard_kind": "cable",
+          "cable_appearance": "black_rubber"
+        },
+        {
+          "event_id": "gray-straight",
+          "hazard_kind": "cable",
+          "cable_appearance": "gray_braided"
+        }
+      ],
+      "result_file": "accept-multicolor-straight-full-speed.json"
+    },
+    {
+      "scene_id": "accept-curved-crossing-raised-turning-full-speed",
+      "scene_group_id": "video-accept-complex-layout-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_complex_turning_03mps_01",
+      "duration_seconds": 45.0,
+      "maximum_speed_mps": 0.3,
+      "strata": {
+        "hazard_layout": ["curved", "crossing", "raised"],
+        "hazard_kind": ["cable"],
+        "hazard_form": ["cable", "raised_section"],
+        "cable_appearance": ["white_pvc", "black_rubber"],
+        "negative_class": ["reflection"],
+        "distance": "middle",
+        "floor": "reflective_tile",
+        "light": "strong_reflection",
+        "robot_motion": "turning",
+        "depth_validity": "cable_invalid"
+      },
+      "expected_events": [
+        {
+          "event_id": "white-curved",
+          "hazard_kind": "cable",
+          "cable_appearance": "white_pvc"
+        },
+        {
+          "event_id": "black-crossing",
+          "hazard_kind": "cable",
+          "cable_appearance": "black_rubber"
+        },
+        {
+          "event_id": "raised-section",
+          "hazard_kind": "cable",
+          "cable_appearance": "black_rubber"
+        }
+      ],
+      "result_file": "accept-curved-crossing-raised-turning-full-speed.json"
+    },
+    {
+      "scene_id": "accept-partial-occlusion",
+      "scene_group_id": "video-accept-occlusion-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_partial_occlusion_01",
+      "duration_seconds": 30.0,
+      "maximum_speed_mps": 0.2,
+      "strata": {
+        "hazard_layout": ["partial_occlusion", "raised"],
+        "hazard_kind": ["cable"],
+        "hazard_form": ["cable", "raised_section"],
+        "cable_appearance": ["gray_braided"],
+        "negative_class": ["furniture_leg"],
+        "distance": "near",
+        "floor": "wood",
+        "light": "side_light",
+        "robot_motion": "straight",
+        "depth_validity": "mixed_invalid"
+      },
+      "expected_events": [
+        {
+          "event_id": "gray-partially-occluded",
+          "hazard_kind": "cable",
+          "cable_appearance": "gray_braided"
+        }
+      ],
+      "result_file": "accept-partial-occlusion.json"
+    },
+    {
+      "scene_id": "accept-power-strip-and-plug",
+      "scene_group_id": "video-accept-protrusions-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_power_strip_plug_01",
+      "duration_seconds": 30.0,
+      "maximum_speed_mps": 0.1,
+      "strata": {
+        "hazard_layout": ["straight"],
+        "hazard_kind": ["obvious_protrusion"],
+        "hazard_form": ["power_strip", "plug"],
+        "cable_appearance": [],
+        "negative_class": [],
+        "distance": "near",
+        "floor": "matte_tile",
+        "light": "indoor_diffuse",
+        "robot_motion": "stationary",
+        "depth_validity": "mostly_valid"
+      },
+      "expected_events": [
+        {"event_id": "power-strip", "hazard_kind": "obvious_protrusion"},
+        {"event_id": "plug", "hazard_kind": "obvious_protrusion"}
+      ],
+      "result_file": "accept-power-strip-and-plug.json"
+    },
+    {
+      "scene_id": "accept-negative-reflection-shadow",
+      "scene_group_id": "video-accept-negative-light-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_negative_reflection_shadow_01",
+      "duration_seconds": 60.0,
+      "maximum_speed_mps": 0.2,
+      "strata": {
+        "hazard_layout": [],
+        "hazard_kind": [],
+        "hazard_form": [],
+        "cable_appearance": [],
+        "negative_class": ["reflection", "shadow"],
+        "distance": "far",
+        "floor": "reflective_tile",
+        "light": "strong_reflection",
+        "robot_motion": "straight",
+        "depth_validity": "mixed_invalid"
+      },
+      "expected_events": [],
+      "result_file": "accept-negative-reflection-shadow.json"
+    },
+    {
+      "scene_id": "accept-negative-seam-scratch-tape",
+      "scene_group_id": "video-accept-negative-markings-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_negative_seam_scratch_tape_01",
+      "duration_seconds": 60.0,
+      "maximum_speed_mps": 0.1,
+      "strata": {
+        "hazard_layout": [],
+        "hazard_kind": [],
+        "hazard_form": [],
+        "cable_appearance": [],
+        "negative_class": ["floor_seam", "scratch", "tape"],
+        "distance": "middle",
+        "floor": "matte_tile",
+        "light": "side_light",
+        "robot_motion": "stationary",
+        "depth_validity": "mostly_valid"
+      },
+      "expected_events": [],
+      "result_file": "accept-negative-seam-scratch-tape.json"
+    },
+    {
+      "scene_id": "accept-negative-furniture-mat",
+      "scene_group_id": "video-accept-negative-edges-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_negative_furniture_mat_01",
+      "duration_seconds": 60.0,
+      "maximum_speed_mps": 0.2,
+      "strata": {
+        "hazard_layout": [],
+        "hazard_kind": [],
+        "hazard_form": [],
+        "cable_appearance": [],
+        "negative_class": ["furniture_leg", "mat_edge"],
+        "distance": "near",
+        "floor": "wood",
+        "light": "indoor_diffuse",
+        "robot_motion": "turning",
+        "depth_validity": "mostly_valid"
+      },
+      "expected_events": [],
+      "result_file": "accept-negative-furniture-mat.json"
+    },
+    {
+      "scene_id": "accept-empty-floor",
+      "scene_group_id": "video-accept-empty-floor-01",
+      "split": "acceptance",
+      "bag_id": "home_accept_empty_floor_01",
+      "duration_seconds": 120.0,
+      "maximum_speed_mps": 0.3,
+      "strata": {
+        "hazard_layout": [],
+        "hazard_kind": [],
+        "hazard_form": [],
+        "cable_appearance": [],
+        "negative_class": ["empty_floor"],
+        "distance": "far",
+        "floor": "reflective_tile",
+        "light": "indoor_diffuse",
+        "robot_motion": "straight",
+        "depth_validity": "mostly_valid"
+      },
+      "expected_events": [],
+      "result_file": "accept-empty-floor.json"
+    }
+  ]
+}

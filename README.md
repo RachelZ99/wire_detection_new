@@ -347,6 +347,43 @@ two-hour acceptance. The bag and RK3588 runtime are external artifacts, so this
 checkout supplies the reproducible measurement gate but does not claim that
 the hardware soak has already passed.
 
+## Home event regression and NPU gate
+
+The versioned home scene plan is
+`low_profile_hazard_perception/config/home_regression_manifest_v1.json`. Its
+held-out acceptance split covers cable color/material and layout variation,
+power strips/plugs, the specified difficult negatives, all reporting strata,
+and actual 0.3 m/s straight and turning evidence. Tuning and acceptance videos
+cannot share a scene group or bag ID.
+
+After black-box replay has produced one normalized result JSON per scene, run:
+
+```bash
+ros2 run low_profile_hazard_perception audit_home_regression \
+  --results-directory /path/to/home-regression-results \
+  --output home-regression-report.json \
+  --decision-record home-regression-npu-decision.md
+```
+
+The result contract is
+`low_profile_hazard_perception/config/home_regression_scene_result_schema_v1.json`.
+The audit reports event recall, persistent false events per hour, confirmed
+detection distance, confirmation latency, health failures, resource use, and
+the same metrics stratified by distance, cable appearance, floor, light, robot
+motion, and depth validity. It verifies the bound profile/rule identity,
+two-pass determinism, bag fingerprints, actual evaluated duration, and actual
+odom-observed speed.
+
+`RULE_PATH_PASSES` keeps ticket 8 closed. `NPU_REQUIRED` is emitted only when a
+complete held-out suite identifies one or more configured RGB cable failure
+classes. Missing evidence yields `EVIDENCE_INCOMPLETE`; geometry, health,
+timing, or resource failures yield `NON_NPU_FAILURE`, and neither state is
+misrepresented as a reason to train a cable model. See
+`docs/home-regression-suite.md` and the current evidence record in
+`docs/experiments/0002-home-regression-npu-gate.md`.
+
+All home reports are feasibility evidence, not factory validation.
+
 ## Conservative degradation and retention
 
 Unconfirmed candidates expire after 500 ms and can only confirm inside the
