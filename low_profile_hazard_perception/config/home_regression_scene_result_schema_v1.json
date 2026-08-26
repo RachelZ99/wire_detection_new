@@ -71,6 +71,7 @@
         "required": [
           "injection",
           "health_state",
+          "deterministic",
           "failure_observed",
           "new_confirmed_hazard_observed",
           "passed"
@@ -78,6 +79,7 @@
         "properties": {
           "injection": {"type": "string", "minLength": 1},
           "health_state": {"enum": ["HEALTHY", "DEGRADED", "INVALID"]},
+          "deterministic": {"const": true},
           "failure_observed": {"type": "boolean"},
           "new_confirmed_hazard_observed": {"type": "boolean"},
           "passed": {"type": "boolean"}

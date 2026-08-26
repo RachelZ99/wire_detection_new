@@ -9,7 +9,7 @@ import math
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from jsonschema import Draft202012Validator
 
@@ -19,7 +19,16 @@ from .home_regression import (
     default_home_regression_manifest_path,
     main as audit_main,
 )
+from .health import Stream
 from .temporal import EvidenceMask
+
+
+_INJECTION_STREAMS = {
+    "rgb": frozenset({Stream.COLOR_IMAGE, Stream.COLOR_CAMERA_INFO}),
+    "depth": frozenset({Stream.DEPTH_IMAGE, Stream.DEPTH_CAMERA_INFO}),
+    "odom": frozenset({Stream.ODOM}),
+    "tf": frozenset({Stream.TF, Stream.TF_STATIC}),
+}
 
 
 def normalize_home_scene_replay(
@@ -29,25 +38,13 @@ def normalize_home_scene_replay(
     annotation: Mapping[str, object],
     runs: Sequence[Mapping[str, Any]],
     bag_sha256: str,
-    failure_runs: Mapping[str, Mapping[str, Any]] | None = None,
+    failure_runs: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> dict[str, object]:
     """Turn repeated operational-output captures into one scene result."""
     if len(runs) < 2:
         raise ValueError("home scene replay requires at least two runs")
     scene_id = str(scene["scene_id"])
-    annotation_errors = list(_annotation_validator().iter_errors(annotation))
-    if annotation_errors:
-        first = min(
-            annotation_errors,
-            key=lambda error: tuple(str(part) for part in error.absolute_path),
-        )
-        path = ".".join(str(part) for part in first.absolute_path) or "root"
-        raise ValueError(
-            f"scene {scene_id} annotation schema invalid at {path}: "
-            f"{first.message}"
-        )
-    if annotation.get("schema_version") != 1:
-        raise ValueError(f"scene {scene_id} has unsupported annotation schema")
+    _validate_annotation_schema(annotation, scene_id)
     if annotation.get("scene_id") != scene_id:
         raise ValueError(f"scene {scene_id} annotation identity mismatch")
     canonical = _canonical_run(runs[0])
@@ -61,7 +58,11 @@ def normalize_home_scene_replay(
         for event in scene["expected_events"]
     ]
     false_events = _persistent_false_events(
-        annotation.get("negative_regions", []), hazard_clouds
+        cast(
+            Sequence[Mapping[str, object]],
+            annotation["negative_regions"],
+        ),
+        hazard_clouds,
     )
     health = baseline["health"]
     message_age_fields = {
@@ -136,7 +137,11 @@ def normalize_home_scene_replay(
     if duration is None:
         raise ValueError(f"scene {scene_id} replay reported no evaluated duration")
     injection_outcomes = _failure_injection_outcomes(
-        annotation.get("failure_injections", []), failure_runs or {}
+        cast(
+            Sequence[Mapping[str, object]],
+            annotation["failure_injections"],
+        ),
+        failure_runs or {},
     )
     return {
         "schema_version": 1,
@@ -175,6 +180,23 @@ def _annotation_validator() -> Draft202012Validator:
     )
     Draft202012Validator.check_schema(schema)
     return Draft202012Validator(schema)
+
+
+def _validate_annotation_schema(
+    annotation: Mapping[str, object], scene_id: str
+) -> None:
+    errors = list(_annotation_validator().iter_errors(annotation))
+    if not errors:
+        return
+    first = min(
+        errors,
+        key=lambda error: tuple(str(part) for part in error.absolute_path),
+    )
+    path = ".".join(str(part) for part in first.absolute_path) or "root"
+    raise ValueError(
+        f"scene {scene_id} annotation schema invalid at {path}: "
+        f"{first.message}"
+    )
 
 
 def _canonical_run(run: Mapping[str, Any]) -> dict[str, object]:
@@ -226,12 +248,10 @@ def _unique_hazards(
 def _annotation_events(
     scene: Mapping[str, object], annotation: Mapping[str, object]
 ) -> dict[str, Mapping[str, object]]:
-    raw = annotation["events"]
-    assert isinstance(raw, Sequence) and not isinstance(raw, str)
+    raw = cast(Sequence[Mapping[str, object]], annotation["events"])
     events = {
         str(item["event_id"]): item
         for item in raw
-        if isinstance(item, Mapping)
     }
     expected = {event["event_id"] for event in scene["expected_events"]}
     if set(events) != expected:
@@ -302,22 +322,12 @@ def _event_outcome(
 
 
 def _persistent_false_events(
-    raw_regions: object,
+    raw_regions: Sequence[Mapping[str, object]],
     clouds: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    if not isinstance(raw_regions, Sequence) or isinstance(raw_regions, str):
-        raise ValueError("negative_regions must be a list")
     events: list[dict[str, object]] = []
     for region in raw_regions:
-        if not isinstance(region, Mapping):
-            raise ValueError("negative region must be an object")
-        bounds = region.get("bounds_odom")
-        if (
-            not isinstance(bounds, Sequence)
-            or isinstance(bounds, str)
-            or len(bounds) != 4
-        ):
-            raise ValueError("negative region bounds_odom must have four values")
+        bounds = cast(Sequence[object], region["bounds_odom"])
         minimum_x, maximum_x, minimum_y, maximum_y = (
             float(value) for value in bounds
         )
@@ -370,19 +380,20 @@ def _persistent_false_events(
 
 
 def _failure_injection_outcomes(
-    raw_injections: object,
-    runs: Mapping[str, Mapping[str, Any]],
+    raw_injections: Sequence[Mapping[str, object]],
+    runs: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> list[dict[str, object]]:
-    if not isinstance(raw_injections, Sequence) or isinstance(raw_injections, str):
-        raise ValueError("failure_injections must be a list")
     outcomes: list[dict[str, object]] = []
     for injection in raw_injections:
-        if not isinstance(injection, Mapping):
-            raise ValueError("failure injection must be an object")
         name = str(injection.get("injection", ""))
         if not name or name not in runs:
             continue
-        run = runs[name]
+        injection_runs = runs[name]
+        run = injection_runs[0]
+        deterministic = all(
+            _canonical_run(candidate) == _canonical_run(run)
+            for candidate in injection_runs[1:]
+        )
         state = str(run["health"]["canonical"]["state"])
         new_hazard_observed = any(
             not cloud.get("clearing") for cloud in run["clouds"]
@@ -394,7 +405,7 @@ def _failure_injection_outcomes(
             "resource.npu_state"
         )
         failure_observed = _failure_observed(name, run, actual_npu_state)
-        passed = failure_observed and state == expected_state and (
+        passed = deterministic and failure_observed and state == expected_state and (
             not forbid_hazard or not new_hazard_observed
         )
         if expected_npu_state is not None:
@@ -403,6 +414,7 @@ def _failure_injection_outcomes(
             {
                 "injection": name,
                 "health_state": state,
+                "deterministic": deterministic,
                 "failure_observed": failure_observed,
                 "new_confirmed_hazard_observed": new_hazard_observed,
                 "passed": passed,
@@ -423,18 +435,39 @@ def _failure_observed(
             "failed",
         }
     health = run["health"]
-    reason_text = " ".join(
-        str(transition.get("reasons", ""))
-        for transition in health["transitions"]
-    ).lower()
     stable = health["canonical"]["stable_values"]
-    reason_text += " " + str(stable.get("reasons", "")).lower()
+    reason_tokens = {
+        token.strip()
+        for reasons in [
+            *(transition.get("reasons", "") for transition in health["transitions"]),
+            stable.get("reasons", ""),
+        ]
+        for token in str(reasons).split(",")
+        if token.strip()
+    }
     if injection == "ground_model":
-        return "ground" in reason_text or stable.get("ground.state") in {
+        return any(token.startswith("ground:") for token in reason_tokens) or stable.get(
+            "ground.state"
+        ) in {
             "REJECTED",
             "UNAVAILABLE",
         }
-    return injection in reason_text
+    streams = _INJECTION_STREAMS.get(injection, frozenset())
+    return any(
+        str(stable.get(f"{stream.value}.delivered_count")) == "0"
+        or any(
+            token in reason_tokens
+            for token in (
+                f"missing:{stream.value}",
+                f"sensor_stale:{stream.value}",
+                f"receive_stale:{stream.value}",
+                f"invalid:{stream.value}",
+            )
+        )
+        for stream in streams
+    ) or (
+        injection == "tf" and "tf_chain_unavailable" in reason_tokens
+    )
 
 
 def _required_number(
@@ -528,6 +561,9 @@ def main(args: list[str] | None = None) -> int:
                 annotation = _json_object(
                     annotation_path.read_bytes(), label=str(annotation_path)
                 )
+                _validate_annotation_schema(
+                    annotation, str(scene["scene_id"])
+                )
                 runs = [
                     _run_once(
                         bag,
@@ -540,17 +576,14 @@ def main(args: list[str] | None = None) -> int:
                     )
                     for _ in range(options.repeat)
                 ]
-                failure_runs: dict[str, Mapping[str, Any]] = {}
-                raw_injections = annotation.get("failure_injections", [])
-                if not isinstance(raw_injections, Sequence) or isinstance(
-                    raw_injections, str
-                ):
-                    raise ValueError(
-                        f"scene {scene['scene_id']} failure_injections must be a list"
-                    )
+                failure_runs: dict[
+                    str, Sequence[Mapping[str, Any]]
+                ] = {}
+                raw_injections = cast(
+                    Sequence[Mapping[str, object]],
+                    annotation["failure_injections"],
+                )
                 for injection in raw_injections:
-                    if not isinstance(injection, Mapping):
-                        raise ValueError("failure injection must be an object")
                     injection_name = str(injection["injection"])
                     if injection_name == "npu":
                         if (
@@ -561,26 +594,31 @@ def main(args: list[str] | None = None) -> int:
                                 "rule-profile npu injection must expect "
                                 "disabled_rule_profile"
                             )
-                        failure_runs[injection_name] = runs[0]
+                        failure_runs[injection_name] = runs
                         continue
                     injection_bag = options.bags_directory / str(
                         injection.get("bag_id", scene["bag_id"])
                     )
-                    topics = injection.get("playback_topics", [])
-                    if not isinstance(topics, Sequence) or isinstance(topics, str):
-                        raise ValueError(
-                            f"failure injection {injection_name} topics must be a list"
-                        )
-                    failure_runs[injection_name] = _run_once(
-                        injection_bag,
-                        health_topic="/low_profile_hazard_perception/health",
-                        cloud_topic=(
-                            "/low_profile_hazard_perception/confirmed_hazards"
-                        ),
-                        rate=options.rate,
-                        startup_timeout=options.startup_timeout,
-                        playback_topics=tuple(str(topic) for topic in topics),
+                    topics = cast(
+                        Sequence[object], injection["playback_topics"]
                     )
+                    failure_runs[injection_name] = [
+                        _run_once(
+                            injection_bag,
+                            health_topic=(
+                                "/low_profile_hazard_perception/health"
+                            ),
+                            cloud_topic=(
+                                "/low_profile_hazard_perception/confirmed_hazards"
+                            ),
+                            rate=options.rate,
+                            startup_timeout=options.startup_timeout,
+                            playback_topics=tuple(
+                                str(topic) for topic in topics
+                            ),
+                        )
+                        for _ in range(options.repeat)
+                    ]
                 result = normalize_home_scene_replay(
                     suite=suite,
                     scene=scene,

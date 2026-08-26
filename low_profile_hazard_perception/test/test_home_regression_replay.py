@@ -230,6 +230,10 @@ class HomeRegressionReplayTests(unittest.TestCase):
                 "latest_volatile_values": {},
             },
             "clouds": [],
+            "runtime": {
+                "evaluated_duration_seconds": 1.0,
+                "observed_maximum_speed_mps": 0.0,
+            },
         }
 
         outcomes = _failure_injection_outcomes(
@@ -240,11 +244,48 @@ class HomeRegressionReplayTests(unittest.TestCase):
                     "forbid_new_confirmed_hazard": True,
                 }
             ],
-            {"rgb": run},
+            {"rgb": [run, run]},
         )
 
         self.assertFalse(outcomes[0]["failure_observed"])
         self.assertFalse(outcomes[0]["passed"])
+
+    def test_rgb_outage_is_recognized_from_structured_stream_health(self) -> None:
+        run = {
+            "health": {
+                "canonical": {
+                    "state": "INVALID",
+                    "stable_values": {
+                        "reasons": "missing:color_image",
+                        "color_image.delivered_count": "0",
+                    },
+                },
+                "transitions": [
+                    {"state": "INVALID", "reasons": "missing:color_image"}
+                ],
+                "latest_volatile_values": {},
+            },
+            "clouds": [],
+            "runtime": {
+                "evaluated_duration_seconds": 1.0,
+                "observed_maximum_speed_mps": 0.0,
+            },
+        }
+
+        outcomes = _failure_injection_outcomes(
+            [
+                {
+                    "injection": "rgb",
+                    "expected_health_state": "INVALID",
+                    "forbid_new_confirmed_hazard": True,
+                }
+            ],
+            {"rgb": [run, run]},
+        )
+
+        self.assertTrue(outcomes[0]["deterministic"])
+        self.assertTrue(outcomes[0]["failure_observed"])
+        self.assertTrue(outcomes[0]["passed"])
 
 
 if __name__ == "__main__":

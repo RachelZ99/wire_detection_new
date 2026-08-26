@@ -19,10 +19,11 @@ keeps tuning videos and held-out acceptance videos in different
   cable-invalid depth, stationary motion, and 0.3 m/s straight and turning
   recordings;
 - injected RGB, depth, odom, TF, observed-ground-model, and optional-NPU
-  failures, each with an expected health state and evidence that the named
-  failure actually occurred. In the rule-only profile, NPU unavailability is
-  verified through the reported `disabled_rule_profile` state while geometry
-  continues independently.
+failures, each with an expected health state and evidence that the named
+failure actually occurred. In the rule-only profile, NPU unavailability is
+verified through the reported `disabled_rule_profile` state while geometry
+continues independently. Fault replays use the same repeat count and must be
+deterministic as well.
 
 The bag files, odom annotations, and result JSON files are external evidence
 artifacts and are not invented or checked into this repository. Annotation

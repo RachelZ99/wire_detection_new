@@ -339,6 +339,7 @@ class HomeRegressionTests(unittest.TestCase):
             {
                 "injection": "rgb",
                 "health_state": "DEGRADED",
+                "deterministic": True,
                 "failure_observed": True,
                 "new_confirmed_hazard_observed": False,
                 "passed": True,
@@ -348,6 +349,7 @@ class HomeRegressionTests(unittest.TestCase):
             {
                 "injection": "rgb",
                 "health_state": "HEALTHY",
+                "deterministic": True,
                 "failure_observed": True,
                 "new_confirmed_hazard_observed": True,
                 "passed": False,
