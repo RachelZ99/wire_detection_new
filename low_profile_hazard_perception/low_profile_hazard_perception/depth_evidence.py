@@ -8,7 +8,7 @@ from typing import Sequence
 
 from .cable import ObservedFloorRegion
 from .geometry import CameraIntrinsics, GroundPlane, Point3
-from .temporal import EvidenceSource
+from .temporal import CandidateDecisionReason, EvidenceSource
 
 
 Pixel = tuple[int, int]
@@ -61,6 +61,21 @@ class DepthEvidenceCandidate:
     confidence: float
 
 
+@dataclass(frozen=True)
+class DepthEvidenceRejection:
+    evidence: EvidenceSource
+    points_camera: tuple[Point3, ...]
+    centroid: Point3
+    support_count: int
+    decision_reason: CandidateDecisionReason
+
+
+@dataclass(frozen=True)
+class DepthEvidenceDetection:
+    candidates: tuple[DepthEvidenceCandidate, ...]
+    rejections: tuple[DepthEvidenceRejection, ...]
+
+
 class DepthEvidenceDetector:
     """Extract support-only depth evidence without confirming it directly."""
 
@@ -76,7 +91,7 @@ class DepthEvidenceDetector:
         *,
         depth_unit_m: float,
         ground_noise_m: float,
-    ) -> tuple[DepthEvidenceCandidate, ...]:
+    ) -> DepthEvidenceDetection:
         if len(depth_values) < intrinsics.width * intrinsics.height:
             raise ValueError("depth data is smaller than width times height")
         weak = self._weak_height(
@@ -87,12 +102,23 @@ class DepthEvidenceDetector:
             ground_noise_m=ground_noise_m,
         )
         invalid = self._invalid_depth(depth_values, intrinsics, ground, floor_region)
-        return tuple(
+        candidates = tuple(
             sorted(
-                (*weak, *invalid),
+                (*weak.candidates, *invalid.candidates),
                 key=lambda item: (item.evidence.value, item.centroid),
             )
         )
+        rejections = tuple(
+            sorted(
+                (*weak.rejections, *invalid.rejections),
+                key=lambda item: (
+                    item.evidence.value,
+                    item.decision_reason.value,
+                    item.centroid,
+                ),
+            )
+        )
+        return DepthEvidenceDetection(candidates, rejections)
 
     def _weak_height(
         self,
@@ -102,7 +128,7 @@ class DepthEvidenceDetector:
         *,
         depth_unit_m: float,
         ground_noise_m: float,
-    ) -> tuple[DepthEvidenceCandidate, ...]:
+    ) -> DepthEvidenceDetection:
         threshold = max(
             self.config.minimum_weak_height_m,
             self.config.ground_noise_multiplier * ground_noise_m,
@@ -134,8 +160,9 @@ class DepthEvidenceDetector:
                 )
                 cells.setdefault(key, []).append(floor_point)
         candidates = []
+        rejections = []
         for points in _metric_components(cells):
-            candidate = self._candidate(
+            candidate, rejection = self._assess_candidate(
                 EvidenceSource.WEAK_HEIGHT,
                 points,
                 self.config.minimum_weak_support_points,
@@ -143,7 +170,9 @@ class DepthEvidenceDetector:
             )
             if candidate is not None:
                 candidates.append(candidate)
-        return tuple(candidates)
+            if rejection is not None:
+                rejections.append(rejection)
+        return DepthEvidenceDetection(tuple(candidates), tuple(rejections))
 
     def _invalid_depth(
         self,
@@ -151,7 +180,7 @@ class DepthEvidenceDetector:
         intrinsics: CameraIntrinsics,
         ground: GroundPlane,
         floor_region: ObservedFloorRegion,
-    ) -> tuple[DepthEvidenceCandidate, ...]:
+    ) -> DepthEvidenceDetection:
         invalid = {
             (column, row)
             for row in range(intrinsics.height)
@@ -161,11 +190,20 @@ class DepthEvidenceDetector:
                 not isfinite(float(depth_values[row * intrinsics.width + column]))
                 or float(depth_values[row * intrinsics.width + column]) <= 0.0
             )
-            and self._enclosed_by_valid_depth(depth_values, intrinsics, column, row)
         }
         candidates = []
+        rejections = []
         for component in _pixel_components(invalid):
+            raw_points = self._project_pixels(component, intrinsics, ground)
             if len(component) < self.config.minimum_invalid_pixels:
+                rejection = self._rejection(
+                    EvidenceSource.INVALID_DEPTH,
+                    raw_points,
+                    len(component),
+                    CandidateDecisionReason.REJECTED_INSUFFICIENT_SUPPORT,
+                )
+                if rejection is not None:
+                    rejections.append(rejection)
                 continue
             columns = [pixel[0] for pixel in component]
             rows = [pixel[1] for pixel in component]
@@ -173,27 +211,48 @@ class DepthEvidenceDetector:
             height = max(rows) - min(rows) + 1
             major = float(max(width, height))
             minor = float(min(width, height))
-            if (
-                major < self.config.minimum_invalid_span_px
-                or minor > self.config.maximum_invalid_width_px
-            ):
+            if minor > self.config.maximum_invalid_width_px:
+                rejection = self._rejection(
+                    EvidenceSource.INVALID_DEPTH,
+                    raw_points,
+                    len(component),
+                    CandidateDecisionReason.REJECTED_INVALID_DEPTH_TOO_WIDE,
+                )
+                if rejection is not None:
+                    rejections.append(rejection)
                 continue
-            points = tuple(
-                point
-                for column, row in sorted(
-                    component, key=lambda item: (item[1], item[0])
+            if major < self.config.minimum_invalid_span_px:
+                rejection = self._rejection(
+                    EvidenceSource.INVALID_DEPTH,
+                    raw_points,
+                    len(component),
+                    CandidateDecisionReason.REJECTED_INSUFFICIENT_SPAN,
                 )
-                if (
-                    point := ground.intersect_pixel_ray(
-                        intrinsics, column=column, row=row
-                    )
+                if rejection is not None:
+                    rejections.append(rejection)
+                continue
+            enclosed = {
+                (column, row)
+                for column, row in component
+                if self._enclosed_by_valid_depth(
+                    depth_values,
+                    intrinsics,
+                    column,
+                    row,
                 )
-                is not None
-                and self.config.minimum_depth_m
-                <= point[2]
-                <= self.config.maximum_depth_m
-            )
-            candidate = self._candidate(
+            }
+            points = self._project_pixels(enclosed, intrinsics, ground)
+            if len(enclosed) < self.config.minimum_invalid_pixels:
+                rejection = self._rejection(
+                    EvidenceSource.INVALID_DEPTH,
+                    raw_points,
+                    len(component),
+                    CandidateDecisionReason.REJECTED_INVALID_DEPTH_NOT_ENCLOSED,
+                )
+                if rejection is not None:
+                    rejections.append(rejection)
+                continue
+            candidate, rejection = self._assess_candidate(
                 EvidenceSource.INVALID_DEPTH,
                 points,
                 self.config.minimum_invalid_pixels,
@@ -201,7 +260,29 @@ class DepthEvidenceDetector:
             )
             if candidate is not None:
                 candidates.append(candidate)
-        return tuple(candidates)
+            if rejection is not None:
+                rejections.append(rejection)
+        return DepthEvidenceDetection(tuple(candidates), tuple(rejections))
+
+    def _project_pixels(
+        self,
+        pixels: set[Pixel],
+        intrinsics: CameraIntrinsics,
+        ground: GroundPlane,
+    ) -> tuple[Point3, ...]:
+        return tuple(
+            point
+            for column, row in sorted(pixels, key=lambda item: (item[1], item[0]))
+            if (
+                point := ground.intersect_pixel_ray(
+                    intrinsics,
+                    column=column,
+                    row=row,
+                )
+            )
+            is not None
+            and self.config.minimum_depth_m <= point[2] <= self.config.maximum_depth_m
+        )
 
     def _enclosed_by_valid_depth(
         self,
@@ -229,34 +310,72 @@ class DepthEvidenceDetector:
             for distance in range(1, maximum_distance + 1)
         )
 
-    def _candidate(
+    def _assess_candidate(
         self,
         evidence: EvidenceSource,
         points: Sequence[Point3],
         minimum_support: int,
         base_confidence: float,
-    ) -> DepthEvidenceCandidate | None:
+    ) -> tuple[DepthEvidenceCandidate | None, DepthEvidenceRejection | None]:
         if len(points) < minimum_support:
-            return None
+            return None, self._rejection(
+                evidence,
+                points,
+                len(points),
+                CandidateDecisionReason.REJECTED_INSUFFICIENT_SUPPORT,
+            )
         span = hypot(
             max(point[0] for point in points) - min(point[0] for point in points),
             max(point[2] for point in points) - min(point[2] for point in points),
         )
         if span < self.config.minimum_physical_span_m:
-            return None
-        stride = max(1, len(points) // self.config.maximum_output_points)
-        output = tuple(points[::stride][: self.config.maximum_output_points])
-        centroid = tuple(
-            sum(point[axis] for point in output) / len(output) for axis in range(3)
+            return None, self._rejection(
+                evidence,
+                points,
+                len(points),
+                CandidateDecisionReason.REJECTED_INSUFFICIENT_SPAN,
+            )
+        output = self._bounded_points(points)
+        centroid = _centroid(output)
+        return (
+            DepthEvidenceCandidate(
+                evidence=evidence,
+                points_camera=output,
+                centroid=centroid,
+                support_count=len(points),
+                physical_span_m=span,
+                confidence=min(0.7, base_confidence + min(0.1, span)),
+            ),
+            None,
         )
-        return DepthEvidenceCandidate(
+
+    def _rejection(
+        self,
+        evidence: EvidenceSource,
+        points: Sequence[Point3],
+        support_count: int,
+        reason: CandidateDecisionReason,
+    ) -> DepthEvidenceRejection | None:
+        if not points:
+            return None
+        output = self._bounded_points(points)
+        return DepthEvidenceRejection(
             evidence=evidence,
             points_camera=output,
-            centroid=centroid,
-            support_count=len(points),
-            physical_span_m=span,
-            confidence=min(0.7, base_confidence + min(0.1, span)),
+            centroid=_centroid(output),
+            support_count=support_count,
+            decision_reason=reason,
         )
+
+    def _bounded_points(self, points: Sequence[Point3]) -> tuple[Point3, ...]:
+        stride = max(1, len(points) // self.config.maximum_output_points)
+        return tuple(points[::stride][: self.config.maximum_output_points])
+
+
+def _centroid(points: Sequence[Point3]) -> Point3:
+    return tuple(
+        sum(point[axis] for point in points) / len(points) for axis in range(3)
+    )
 
 
 def _metric_components(

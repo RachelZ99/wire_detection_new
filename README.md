@@ -203,9 +203,11 @@ camera-to-base tilt and height before points are carried into `odom`.
 
 Points at least 15 mm above that observed floor enter the strong-geometry path
 only when they have robust local metric support and physical span. Invalid
-reflective-floor depth is ignored as evidence. Every candidate is transformed
-with an interpolated odom pose at the depth sensor stamp; two observations must
-associate within 80 mm and 350 ms before any operational output is published.
+reflective-floor depth is excluded from strong geometry and emitted separately
+only when it forms bounded support-only invalid-depth evidence. Every candidate
+is transformed with an interpolated odom pose at the depth sensor stamp; two
+observations must associate within 80 mm and 350 ms before any operational
+output is published.
 Odom brackets wider than 100 ms or containing a 0.25 m/45° discontinuity cannot
 support alignment or confirmation.
 The resulting `sensor_msgs/PointCloud2` uses frame `odom` and the confirming
@@ -231,19 +233,25 @@ range and consistency, curve continuity, and projected physical span. It does
 not encode pink, white, or any other cable color, and it has no legacy
 5000-pixel component-area gate.
 
-Only cells supported by the latest accepted observed-ground depth can generate
-RGB candidates. Nearby floor support conservatively bridges the narrow invalid
-depth stripe caused by a cable, while observed raised cells exclude hanging
-wires, table/tripod legs, and background structure. Every accepted RGB pixel is
-positioned by ray intersection with the observed ground plane, including cable
-pixels whose depth is invalid. A ground model more than 500 ms from the RGB
-sensor stamp blocks new cable evidence as `ground:stale`.
+Only cells supported by the accepted observed-ground snapshot selected for the
+RGB sensor stamp can generate RGB candidates. Accepted snapshots are held in a
+small timestamp-ordered cache; an RGB frame waits as `ground:awaiting_depth`
+until the depth stream has advanced past it, then deterministically selects the
+nearest snapshot (preferring the earlier stamp on a tie). Nearby floor support
+conservatively bridges the narrow invalid depth stripe caused by a cable, while
+observed raised cells exclude hanging wires, table/tripod legs, and background
+structure. Every accepted RGB pixel is positioned by ray intersection with the
+selected observed ground plane, including cable pixels whose depth is invalid.
+A ground model more than 500 ms from the RGB sensor stamp blocks new cable
+evidence as `ground:stale`.
 
 Each RGB observation uses its own sensor stamp for odom interpolation and enters
 the same two-observation tracker, retained set, and transient-local operational
 point cloud as strong geometry. Health exposes provider, candidate/confirmation
 counts, processing/drop counts, ground-ray projection, and
-`cable.rgb_depth_synchronizer=disabled`.
+`cable.rgb_depth_synchronizer=disabled`. A bounded, timestamp-ordered RGB
+reorder queue holds frames only until the depth event-time watermark reaches
+them; it does not form approximate-time image pairs.
 
 The optional pink demo profile is disabled by default. When explicitly enabled,
 it publishes only `cable.diagnostic_pink_pixel_count`; health also states
@@ -269,8 +277,9 @@ The `odom` tracker accepts cross-stream observations in sensor-stamp order or
 arrival order and converges on the same retained hazard. Two strong geometry
 observations, two RGB cable observations at or above confidence 0.75, or one
 strong geometry plus one high-confidence RGB observation can confirm. Weak
-height, low-confidence RGB, and invalid depth can strengthen a spatially
-matching cable track but never count as a confirming observation. Two candidate
+height and invalid depth can strengthen a spatially matching cable or
+strong-geometry track, but never count as a confirming observation;
+low-confidence RGB likewise cannot confirm. Two candidate
 components from the same sensor stamp count as one observation. Odom evidence
 coordinates are canonicalized at 0.1 mm, below meaningful detection precision,
 to prevent insignificant floor-fit floating-point jitter from changing replay
@@ -282,8 +291,10 @@ Every generated candidate is published separately on
 `odom` centroid, aggregate evidence sources, observed-ground acceptance and
 quality metrics, confidence, and a stable decision reason such as
 `SUPPORT_ONLY`, `LOW_CONFIDENCE_RGB`, `WAITING_FOR_CONFIRMATION`, or
-`CONFIRMED_MIXED_EVIDENCE`. This debug topic is not the operational navigation
-interface; only retained confirmed hazards appear on
+`CONFIRMED_MIXED_EVIDENCE`. Depth components rejected for insufficient support
+or span, excessive invalid-region width, or missing valid-depth enclosure are
+also reported with stable `REJECTED_*` reasons. This debug topic is not the
+operational navigation interface; only retained confirmed hazards appear on
 `/low_profile_hazard_perception/confirmed_hazards`.
 
 ## Conservative degradation and retention

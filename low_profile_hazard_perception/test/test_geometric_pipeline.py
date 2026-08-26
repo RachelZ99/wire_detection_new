@@ -10,6 +10,7 @@ from low_profile_hazard_perception.geometry import (
     StrongGeometryConfig,
 )
 from low_profile_hazard_perception.temporal import (
+    CandidateDecisionReason,
     HazardTrackerConfig,
     Pose3,
 )
@@ -115,6 +116,11 @@ class GeometricPipelineTests(unittest.TestCase):
         self.assertTrue(first.ground.accepted, first.ground.reason)
         self.assertEqual(first.candidates, ())
         self.assertEqual(second.confirmed, ())
+        self.assertTrue(first.candidate_reports)
+        self.assertEqual(
+            first.candidate_reports[0].decision_reason,
+            CandidateDecisionReason.REJECTED_INVALID_DEPTH_TOO_WIDE,
+        )
 
     def test_odom_outage_clears_cross_frame_confirmation(self) -> None:
         depth, intrinsics = _scene(raised=True, reflective_hole=False)

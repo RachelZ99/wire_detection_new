@@ -259,6 +259,55 @@ class TemporalObservationAlignmentTests(unittest.TestCase):
             ),
         )
 
+    def test_invalid_depth_can_strengthen_matching_strong_geometry(self) -> None:
+        point = ((0.8, 0.2, 0.02),)
+        invalid = HazardObservation(
+            sensor_stamp_ns=1_050_000_000,
+            points_odom=point,
+            evidence=EvidenceSource.INVALID_DEPTH,
+            confidence=0.55,
+        )
+        first_geometry = HazardObservation(
+            sensor_stamp_ns=1_000_000_000,
+            points_odom=point,
+            evidence=EvidenceSource.STRONG_GEOMETRY,
+            confidence=0.90,
+        )
+        second_geometry = HazardObservation(
+            sensor_stamp_ns=1_200_000_000,
+            points_odom=point,
+            evidence=EvidenceSource.STRONG_GEOMETRY,
+            confidence=0.92,
+        )
+
+        outcomes = []
+        for observations in (
+            (invalid, first_geometry, second_geometry),
+            (first_geometry, invalid, second_geometry),
+        ):
+            tracker = HazardTracker()
+            decisions = [
+                tracker.observe_with_decision(observation)
+                for observation in observations
+            ]
+            outcomes.append(tracker.retained_at(1_200_000_000))
+            invalid_decision = decisions[observations.index(invalid)]
+            self.assertEqual(
+                invalid_decision.decision_reason,
+                CandidateDecisionReason.SUPPORT_ONLY,
+            )
+
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(len(outcomes[0]), 1)
+        self.assertEqual(outcomes[0][0].observation_count, 2)
+        self.assertEqual(
+            outcomes[0][0].evidence,
+            (
+                EvidenceSource.INVALID_DEPTH,
+                EvidenceSource.STRONG_GEOMETRY,
+            ),
+        )
+
     def test_tracker_exposes_machine_readable_mixed_evidence_decisions(
         self,
     ) -> None:

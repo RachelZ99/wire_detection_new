@@ -272,6 +272,10 @@ class CandidateDecisionReason(str, Enum):
     SUPPORT_ONLY = "SUPPORT_ONLY"
     LOW_CONFIDENCE_RGB = "LOW_CONFIDENCE_RGB"
     WAITING_FOR_CONFIRMATION = "WAITING_FOR_CONFIRMATION"
+    REJECTED_INSUFFICIENT_SUPPORT = "REJECTED_INSUFFICIENT_SUPPORT"
+    REJECTED_INSUFFICIENT_SPAN = "REJECTED_INSUFFICIENT_SPAN"
+    REJECTED_INVALID_DEPTH_TOO_WIDE = "REJECTED_INVALID_DEPTH_TOO_WIDE"
+    REJECTED_INVALID_DEPTH_NOT_ENCLOSED = "REJECTED_INVALID_DEPTH_NOT_ENCLOSED"
     CONFIRMED_STRONG_GEOMETRY = "CONFIRMED_STRONG_GEOMETRY"
     CONFIRMED_RGB_CABLE = "CONFIRMED_RGB_CABLE"
     CONFIRMED_MIXED_EVIDENCE = "CONFIRMED_MIXED_EVIDENCE"
@@ -444,7 +448,7 @@ class HazardTracker:
                 (self._distance(centroid, track.centroid), track)
                 for track in self._tracks
                 if track.confirmed
-                and self._evidence_compatible(track, observation.evidence)
+                and self._can_fuse_with_track(track)
                 and self._distance(centroid, track.centroid)
                 <= self.config.association_radius_m
             ]
@@ -457,13 +461,13 @@ class HazardTracker:
                     (
                         self._confirmation_reason(track)
                         if confirmed
-                        else CandidateDecisionReason.WAITING_FOR_CONFIRMATION
+                        else self._pending_reason(observation, can_confirm)
                     ),
                 )
         matching = [
             (self._distance(centroid, track.centroid), track)
             for track in self._tracks
-            if self._evidence_compatible(track, observation.evidence)
+            if self._can_fuse_with_track(track)
             and (not track.confirmed or not require_reconfirmation_for_confirmed)
             and (
                 track.confirmed
@@ -531,11 +535,7 @@ class HazardTracker:
             )
             self._tracks.append(track)
         if len(track.observation_centroids) < 2 or not counts_for_confirmation:
-            reason = CandidateDecisionReason.WAITING_FOR_CONFIRMATION
-            if self._is_support(observation.evidence):
-                reason = CandidateDecisionReason.SUPPORT_ONLY
-            elif not can_confirm:
-                reason = CandidateDecisionReason.LOW_CONFIDENCE_RGB
+            reason = self._pending_reason(observation, can_confirm)
             return self._decision(track, (), reason)
         track.confirmed = True
         confirmed = (self._confirmed_hazard(track),)
@@ -579,27 +579,25 @@ class HazardTracker:
         )
 
     @classmethod
-    def _evidence_compatible(cls, track: _Track, evidence: EvidenceSource) -> bool:
+    def _pending_reason(
+        cls,
+        observation: HazardObservation,
+        can_confirm: bool,
+    ) -> CandidateDecisionReason:
+        if cls._is_support(observation.evidence):
+            return CandidateDecisionReason.SUPPORT_ONLY
+        if not can_confirm:
+            return CandidateDecisionReason.LOW_CONFIDENCE_RGB
+        return CandidateDecisionReason.WAITING_FOR_CONFIRMATION
+
+    @staticmethod
+    def _can_fuse_with_track(track: _Track) -> bool:
         support_only = not track.observation_centroids
-        if cls._is_support(evidence):
-            return support_only or EvidenceSource.RGB_CABLE in track.evidence
-        if evidence is EvidenceSource.RGB_CABLE:
-            return support_only or bool(
-                track.evidence
-                & {
-                    EvidenceSource.RGB_CABLE,
-                    EvidenceSource.STRONG_GEOMETRY,
-                }
-            )
-        if evidence is EvidenceSource.STRONG_GEOMETRY:
-            return bool(
-                track.evidence
-                & {
-                    EvidenceSource.RGB_CABLE,
-                    EvidenceSource.STRONG_GEOMETRY,
-                }
-            )
-        return False
+        confirmable_evidence = {
+            EvidenceSource.RGB_CABLE,
+            EvidenceSource.STRONG_GEOMETRY,
+        }
+        return support_only or bool(track.evidence & confirmable_evidence)
 
     def _observe_refresh(
         self, track: _Track, observation: HazardObservation

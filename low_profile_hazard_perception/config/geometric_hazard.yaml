@@ -40,7 +40,7 @@ geometric_hazard:
     geometry_cluster_cell_m: 0.04
 
     # Weak height and narrow continuous invalid depth are support-only.
-    # They can strengthen a matching cable shape but never confirm alone.
+    # They can strengthen matching cable or strong geometry but never confirm alone.
     depth_evidence_sample_stride_px: 1
     weak_height_m: 0.006
     weak_ground_noise_multiplier: 3.0
@@ -62,6 +62,8 @@ geometric_hazard:
     cable_minimum_curve_continuity: 0.80
     cable_minimum_physical_span_m: 0.06
     cable_maximum_ground_age_ms: 500.0
+    # Bounded event-time reorder buffer; this is not an RGB-depth synchronizer.
+    rgb_reorder_capacity: 16
 
     # Optional legacy-style demo comparison. These values only produce a
     # diagnostic pixel count and can never create a hazard observation.

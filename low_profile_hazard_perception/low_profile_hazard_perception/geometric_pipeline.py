@@ -60,10 +60,10 @@ class RgbCablePipelineResult:
 
 
 @dataclass(frozen=True)
-class ObservedFloorSnapshot:
+class ObservedGroundSnapshot:
     sensor_stamp_ns: int
     estimate: GroundEstimate
-    region: ObservedFloorRegion
+    region: ObservedFloorRegion | None
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,10 @@ class GeometricHazardPipeline:
         self.nominal_camera_height_m = 0.0
         self._last_aligned_observation_stamp_ns: int | None = None
         self._last_aligned_rgb_stamp_ns: int | None = None
-        self._latest_floor: ObservedFloorSnapshot | None = None
+        self._latest_accepted_floor: ObservedGroundSnapshot | None = None
+        self._ground_snapshots: list[ObservedGroundSnapshot] = []
+        self._active_rgb_floor: ObservedGroundSnapshot | None = None
+        self._rgb_projection_reason = ""
         self._pending_alignment_reason = ""
         self._confirmed_expiry_suspended = False
 
@@ -119,6 +122,10 @@ class GeometricHazardPipeline:
     @property
     def alignment_reason(self) -> str:
         return self._pending_alignment_reason
+
+    @property
+    def rgb_projection_reason(self) -> str:
+        return self._rgb_projection_reason
 
     def add_odom(self, sensor_stamp_ns: int, odom_from_base: Pose3) -> str:
         reason = self.odom.add(sensor_stamp_ns, odom_from_base)
@@ -189,7 +196,14 @@ class GeometricHazardPipeline:
         )
         if not ground.accepted:
             self._suspend_confirmation()
-            self._latest_floor = None
+            self._record_ground_snapshot(
+                ObservedGroundSnapshot(
+                    sensor_stamp_ns=sensor_stamp_ns,
+                    estimate=ground,
+                    region=None,
+                )
+            )
+            self._active_rgb_floor = None
             return GeometricPipelineResult(
                 sensor_stamp_ns=sensor_stamp_ns,
                 ground=ground,
@@ -212,11 +226,12 @@ class GeometricHazardPipeline:
             ground.model,
             depth_unit_m=depth_unit_m,
         )
-        self._latest_floor = ObservedFloorSnapshot(
+        floor_snapshot = ObservedGroundSnapshot(
             sensor_stamp_ns=sensor_stamp_ns,
             estimate=ground,
             region=floor_region,
         )
+        self._record_ground_snapshot(floor_snapshot)
         odom_from_camera = odom_from_base.compose(observed_base_from_camera)
         candidates = self.geometry_detector.detect(
             depth_values,
@@ -237,7 +252,9 @@ class GeometricHazardPipeline:
                 HazardObservation(
                     sensor_stamp_ns=sensor_stamp_ns,
                     points_odom=tuple(
-                        _stable_point(odom_from_camera.transform_point(point))
+                        _quantize_point_to_0_1_mm(
+                            odom_from_camera.transform_point(point)
+                        )
                         for point in candidate.points
                     ),
                     evidence=EvidenceSource.STRONG_GEOMETRY,
@@ -249,16 +266,33 @@ class GeometricHazardPipeline:
                 HazardObservation(
                     sensor_stamp_ns=sensor_stamp_ns,
                     points_odom=tuple(
-                        _stable_point(odom_from_camera.transform_point(point))
+                        _quantize_point_to_0_1_mm(
+                            odom_from_camera.transform_point(point)
+                        )
                         for point in candidate.points_camera
                     ),
                     evidence=candidate.evidence,
                     confidence=candidate.confidence,
                 )
-                for candidate in depth_evidence
+                for candidate in depth_evidence.candidates
             ),
             ground=ground,
             degradation_reason=degradation_reason,
+        )
+        candidate_reports += tuple(
+            CandidateReport(
+                sensor_stamp_ns=sensor_stamp_ns,
+                centroid_odom=_quantize_point_to_0_1_mm(
+                    odom_from_camera.transform_point(rejection.centroid)
+                ),
+                evidence_sources=(rejection.evidence,),
+                ground_accepted=ground.accepted,
+                ground_reason=ground.reason,
+                ground_quality=ground.metrics,
+                confidence=0.0,
+                decision_reason=rejection.decision_reason,
+            )
+            for rejection in depth_evidence.rejections
         )
         return GeometricPipelineResult(
             sensor_stamp_ns=sensor_stamp_ns,
@@ -283,8 +317,10 @@ class GeometricHazardPipeline:
         if (
             self.rgb_intrinsics is None
             or self.base_from_camera is None
-            or self._latest_floor is None
+            or not self._ground_snapshots
         ):
+            self._active_rgb_floor = None
+            self._rgb_projection_reason = "ground:unavailable"
             return None
         alignment = self.odom.alignment_at(sensor_stamp_ns)
         if alignment.pose is None:
@@ -304,12 +340,39 @@ class GeometricHazardPipeline:
         ):
             self._suspend_confirmation()
             degradation_reason = "odom:discontinuous"
-        self._last_aligned_rgb_stamp_ns = sensor_stamp_ns
-        floor = self._latest_floor
+        latest_ground = self._ground_snapshots[-1]
+        if latest_ground.sensor_stamp_ns < sensor_stamp_ns:
+            self._rgb_projection_reason = "ground:awaiting_depth"
+            return None
+        floor = min(
+            self._ground_snapshots,
+            key=lambda snapshot: (
+                abs(snapshot.sensor_stamp_ns - sensor_stamp_ns),
+                snapshot.sensor_stamp_ns,
+            ),
+        )
+        if not floor.estimate.accepted or floor.region is None:
+            self._active_rgb_floor = None
+            self._rgb_projection_reason = f"ground:{floor.estimate.reason}"
+            self._suspend_confirmation()
+            return RgbCablePipelineResult(
+                sensor_stamp_ns=sensor_stamp_ns,
+                ground_sensor_stamp_ns=floor.sensor_stamp_ns,
+                candidates=(),
+                confirmed=(),
+                retained=self.tracker.retained_at(
+                    sensor_stamp_ns,
+                    allow_confirmed_expiry=False,
+                ),
+                candidate_reports=(),
+                degradation_reason=self._rgb_projection_reason,
+            )
         if (
             abs(sensor_stamp_ns - floor.sensor_stamp_ns)
             > self.cable_detector.config.maximum_ground_age_ns
         ):
+            self._active_rgb_floor = None
+            self._rgb_projection_reason = "ground:stale"
             self._suspend_confirmation()
             return RgbCablePipelineResult(
                 sensor_stamp_ns=sensor_stamp_ns,
@@ -323,6 +386,9 @@ class GeometricHazardPipeline:
                 candidate_reports=(),
                 degradation_reason="ground:stale",
             )
+        self._rgb_projection_reason = ""
+        self._active_rgb_floor = floor
+        self._last_aligned_rgb_stamp_ns = sensor_stamp_ns
         candidates = self.cable_detector.detect(
             rgb_values,
             self.rgb_intrinsics,
@@ -339,7 +405,9 @@ class GeometricHazardPipeline:
                 HazardObservation(
                     sensor_stamp_ns=sensor_stamp_ns,
                     points_odom=tuple(
-                        _stable_point(odom_from_camera.transform_point(point))
+                        _quantize_point_to_0_1_mm(
+                            odom_from_camera.transform_point(point)
+                        )
                         for point in candidate.points_camera
                     ),
                     evidence=EvidenceSource.RGB_CABLE,
@@ -405,17 +473,36 @@ class GeometricHazardPipeline:
         config: DiagnosticPinkConfig | None = None,
     ) -> int | None:
         """Run the color demo comparison without observing the tracker."""
-        if self.rgb_intrinsics is None or self._latest_floor is None:
+        floor = self._active_rgb_floor or self._latest_accepted_floor
+        if self.rgb_intrinsics is None or floor is None or floor.region is None:
             return None
         return diagnostic_pink_pixel_count(
             rgb_values,
             self.rgb_intrinsics,
-            self._latest_floor.region,
+            floor.region,
             config,
         )
 
+    def _record_ground_snapshot(self, snapshot: ObservedGroundSnapshot) -> None:
+        self._ground_snapshots = [
+            current
+            for current in self._ground_snapshots
+            if current.sensor_stamp_ns != snapshot.sensor_stamp_ns
+        ]
+        self._ground_snapshots.append(snapshot)
+        self._ground_snapshots.sort(key=lambda current: current.sensor_stamp_ns)
+        self._ground_snapshots = self._ground_snapshots[-16:]
+        accepted_snapshots = [
+            current
+            for current in self._ground_snapshots
+            if current.estimate.accepted
+        ]
+        self._latest_accepted_floor = (
+            accepted_snapshots[-1] if accepted_snapshots else None
+        )
 
-def _stable_point(
+
+def _quantize_point_to_0_1_mm(
     point: tuple[float, float, float]
 ) -> tuple[float, float, float]:
     """Keep odom evidence deterministic below meaningful spatial precision."""

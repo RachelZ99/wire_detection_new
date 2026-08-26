@@ -116,23 +116,37 @@ class RgbCablePipelineTests(unittest.TestCase):
 
         outcomes = []
         for order in (
-            ("depth", "early_rgb", "late_rgb"),
-            ("late_rgb", "early_rgb", "depth"),
+            ("early_rgb", "depth", "late_rgb", "watermark"),
+            ("depth", "early_rgb", "watermark", "late_rgb"),
         ):
             pipeline = make_pipeline()
+            pending_rgb: tuple[int, bytes] | None = None
             for source in order:
                 if source == "depth":
                     pipeline.process_depth(
                         1_050_000_000, _mixed_depth_evidence(intrinsics)
                     )
+                elif source == "watermark":
+                    pipeline.process_depth(
+                        1_250_000_000, _floor_depth(intrinsics)
+                    )
                 elif source == "early_rgb":
-                    pipeline.process_rgb(
-                        1_000_000_000, _cable_rgb(intrinsics, 60)
+                    values = _cable_rgb(intrinsics, 60)
+                    result = pipeline.process_rgb(1_000_000_000, values)
+                    pending_rgb = (
+                        (1_000_000_000, values) if result is None else None
                     )
                 else:
-                    pipeline.process_rgb(
-                        1_200_000_000, _cable_rgb(intrinsics, 60)
+                    values = _cable_rgb(intrinsics, 60)
+                    result = pipeline.process_rgb(1_200_000_000, values)
+                    pending_rgb = (
+                        (1_200_000_000, values) if result is None else None
                     )
+                if source in {"depth", "watermark"} and pending_rgb is not None:
+                    stamp_ns, values = pending_rgb
+                    if pipeline.process_rgb(stamp_ns, values) is not None:
+                        pending_rgb = None
+            self.assertIsNone(pending_rgb)
             outcomes.append(pipeline.retained_at(1_200_000_000))
 
         self.assertEqual(outcomes[0], outcomes[1])
@@ -181,9 +195,10 @@ class RgbCablePipelineTests(unittest.TestCase):
 
         depth = pipeline.process_depth(1_050_000_000, _mixed_depth_evidence(intrinsics))
         first_rgb = pipeline.process_rgb(1_000_000_000, _cable_rgb(intrinsics, 60))
+        watermark = pipeline.process_depth(1_250_000_000, _floor_depth(intrinsics))
         second_rgb = pipeline.process_rgb(1_200_000_000, _cable_rgb(intrinsics, 60))
 
-        assert depth is not None and first_rgb is not None
+        assert depth is not None and first_rgb is not None and watermark is not None
         assert second_rgb is not None
         self.assertEqual(depth.candidates, ())
         self.assertTrue(
@@ -249,6 +264,16 @@ class RgbCablePipelineTests(unittest.TestCase):
         )
         assert rejected is not None
         self.assertFalse(rejected.ground.accepted)
+        rejected_stamp = pipeline.process_rgb(
+            1_100_000_000,
+            _cable_rgb(intrinsics, 60),
+        )
+        self.assertIsNotNone(rejected_stamp)
+        assert rejected_stamp is not None
+        self.assertEqual(
+            rejected_stamp.degradation_reason,
+            "ground:insufficient valid floor samples",
+        )
 
         unsupported = pipeline.process_rgb(
             1_200_000_000,
@@ -256,6 +281,80 @@ class RgbCablePipelineTests(unittest.TestCase):
         )
 
         self.assertIsNone(unsupported)
+
+    def test_later_rejected_ground_does_not_erase_an_earlier_floor_stamp(
+        self,
+    ) -> None:
+        intrinsics = CameraIntrinsics(
+            width=120,
+            height=72,
+            fx=100.0,
+            fy=100.0,
+            cx=60.0,
+            cy=36.0,
+        )
+
+        def make_pipeline() -> GeometricHazardPipeline:
+            pipeline = GeometricHazardPipeline(
+                ground_config=GroundEstimatorConfig(
+                    sample_stride_px=3,
+                    ransac_iterations=100,
+                    minimum_support=180,
+                    minimum_inlier_ratio=0.65,
+                    minimum_spatial_coverage=0.30,
+                ),
+                cable_config=TrainingFreeCableConfig(
+                    minimum_component_pixels=12,
+                    minimum_length_px=12.0,
+                    minimum_physical_span_m=0.04,
+                ),
+            )
+            pipeline.set_intrinsics(intrinsics)
+            pipeline.set_rgb_intrinsics(intrinsics)
+            pipeline.set_base_from_camera(
+                Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0))
+            )
+            for stamp_ns in range(
+                950_000_000,
+                1_251_000_000,
+                50_000_000,
+            ):
+                pipeline.add_odom(stamp_ns, Pose3.identity())
+            return pipeline
+
+        results = []
+        for rgb_before_rejection in (True, False):
+            pipeline = make_pipeline()
+            accepted = pipeline.process_depth(
+                1_000_000_000,
+                _floor_depth(intrinsics),
+            )
+            assert accepted is not None and accepted.ground.accepted
+            if rgb_before_rejection:
+                results.append(
+                    pipeline.process_rgb(
+                        1_000_000_000,
+                        _cable_rgb(intrinsics, 60),
+                    )
+                )
+            rejected = pipeline.process_depth(
+                1_200_000_000,
+                [0] * (intrinsics.width * intrinsics.height),
+            )
+            assert rejected is not None and not rejected.ground.accepted
+            if not rgb_before_rejection:
+                results.append(
+                    pipeline.process_rgb(
+                        1_000_000_000,
+                        _cable_rgb(intrinsics, 60),
+                    )
+                )
+
+        self.assertIsNotNone(results[0])
+        self.assertIsNotNone(results[1])
+        assert results[0] is not None and results[1] is not None
+        self.assertEqual(results[0].candidates, results[1].candidates)
+        self.assertEqual(len(results[0].candidates), 1)
 
     def test_stale_observed_floor_cannot_project_new_rgb_evidence(self) -> None:
         intrinsics = CameraIntrinsics(
@@ -284,13 +383,18 @@ class RgbCablePipelineTests(unittest.TestCase):
         pipeline.set_intrinsics(intrinsics)
         pipeline.set_rgb_intrinsics(intrinsics)
         pipeline.set_base_from_camera(Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0)))
-        for stamp_ns in range(950_000_000, 1_751_000_000, 100_000_000):
+        for stamp_ns in range(950_000_000, 2_251_000_000, 100_000_000):
             pipeline.add_odom(stamp_ns, Pose3.identity())
         ground_result = pipeline.process_depth(
             1_000_000_000,
             _floor_depth(intrinsics),
         )
         assert ground_result is not None
+        watermark = pipeline.process_depth(
+            2_200_000_000,
+            _floor_depth(intrinsics),
+        )
+        assert watermark is not None
 
         stale = pipeline.process_rgb(
             1_600_000_000,
@@ -366,12 +470,17 @@ class RgbCablePipelineTests(unittest.TestCase):
             1_000_000_000,
             _cable_rgb(intrinsics, 60),
         )
+        watermark = pipeline.process_depth(
+            1_200_000_000,
+            _floor_depth(intrinsics),
+        )
         second = pipeline.process_rgb(
             1_200_000_000,
             _cable_rgb(intrinsics, 47),
         )
 
         self.assertIsNotNone(first)
+        self.assertIsNotNone(watermark)
         self.assertIsNotNone(second)
         assert first is not None and second is not None
         self.assertEqual(first.confirmed, ())

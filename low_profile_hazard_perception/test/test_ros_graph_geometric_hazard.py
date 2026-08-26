@@ -233,14 +233,27 @@ def test_two_rgb_cable_observations_publish_the_same_odom_cloud() -> None:
         publishers["color"].publish(_cable_color(first_rgb_stamp, center_column=320))
         _spin_until(
             executor,
-            lambda: _values(health).get("cable.processed_rgb_count") == "1"
-            and _values(health).get("cable.latest_candidate_count") == "1",
+            lambda: _values(health).get("cable.pending_rgb_count") == "1",
             timeout=15.0,
         )
         assert clouds == []
 
         publishers["color"].publish(_cable_color(second_rgb_stamp, center_column=320))
-        _spin_until(executor, lambda: bool(clouds), timeout=15.0)
+        _spin_until(
+            executor,
+            lambda: _values(health).get("cable.pending_rgb_count") == "2",
+            timeout=15.0,
+        )
+        publishers["depth"].publish(
+            _depth(second_rgb_stamp, object_center_column=None)
+        )
+        _spin_until(
+            executor,
+            lambda: bool(clouds)
+            and _values(health).get("cable.processed_rgb_count") == "2"
+            and _values(health).get("cable.pending_rgb_count") == "0",
+            timeout=15.0,
+        )
         _spin_until(
             executor,
             lambda: bool(candidate_diagnostics)

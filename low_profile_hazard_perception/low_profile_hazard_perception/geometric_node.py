@@ -56,7 +56,8 @@ class GeometricHazardNode(InputHealthNode):
     def __init__(self) -> None:
         self._pipeline = GeometricHazardPipeline()
         self._pending_depth: tuple[int, tuple[int, ...]] | None = None
-        self._pending_rgb: tuple[int, bytes] | None = None
+        self._pending_rgb: list[tuple[int, bytes]] = []
+        self._rgb_reorder_capacity = 16
         self._last_ground: GroundEstimate | None = None
         self._last_nominal_ground_angle_error_degrees: float | None = None
         self._last_candidate_count = 0
@@ -78,6 +79,12 @@ class GeometricHazardNode(InputHealthNode):
         self._had_operational_hazard_output = False
         self._active_retained_count = 0
         super().__init__()
+
+        self._rgb_reorder_capacity = int(
+            self.declare_parameter("rgb_reorder_capacity", 16).value
+        )
+        if self._rgb_reorder_capacity < 2:
+            raise ValueError("rgb_reorder_capacity must be at least two")
 
         self._diagnostic_pink_enabled = bool(
             self.declare_parameter("diagnostic_pink_comparison_enabled", False).value
@@ -431,9 +438,22 @@ class GeometricHazardNode(InputHealthNode):
             except ValueError as error:
                 self.get_logger().warning(f"RGB cable path rejected frame: {error}")
                 return
-            if self._pending_rgb is not None:
+            duplicate_index = next(
+                (
+                    index
+                    for index, (stamp_ns, _) in enumerate(self._pending_rgb)
+                    if stamp_ns == observation.sensor_stamp_ns
+                ),
+                None,
+            )
+            if duplicate_index is not None:
+                self._pending_rgb.pop(duplicate_index)
                 self._pending_rgb_drop_count += 1
-            self._pending_rgb = (observation.sensor_stamp_ns, values)
+            self._pending_rgb.append((observation.sensor_stamp_ns, values))
+            self._pending_rgb.sort(key=lambda item: item[0])
+            while len(self._pending_rgb) > self._rgb_reorder_capacity:
+                self._pending_rgb.pop(0)
+                self._pending_rgb_drop_count += 1
             self._try_process_pending_rgb()
             return
         if stream is not Stream.DEPTH_IMAGE:
@@ -500,48 +520,54 @@ class GeometricHazardNode(InputHealthNode):
         self._try_process_pending_rgb()
 
     def _try_process_pending_rgb(self) -> None:
-        if self._pending_rgb is None:
-            return
-        stamp_ns, values = self._pending_rgb
-        projection_reason = rgb_projection_support_reason(self._snapshot())
-        if projection_reason:
-            self._block_new_confirmation(projection_reason)
-            return
-        if self._pipeline.alignment_at(stamp_ns) is None:
-            self._geometric_degradation_reason = (
-                self._pipeline.alignment_reason or "odom:missing"
+        while self._pending_rgb:
+            stamp_ns, values = self._pending_rgb[0]
+            projection_reason = rgb_projection_support_reason(self._snapshot())
+            if projection_reason:
+                self._block_new_confirmation(projection_reason)
+                return
+            if self._pipeline.alignment_at(stamp_ns) is None:
+                self._geometric_degradation_reason = (
+                    self._pipeline.alignment_reason or "odom:missing"
+                )
+                self._publish_health()
+                return
+            result = self._pipeline.process_rgb(stamp_ns, values)
+            if result is None:
+                self._geometric_degradation_reason = (
+                    self._pipeline.rgb_projection_reason or "ground:unavailable"
+                )
+                self._publish_health()
+                return
+            self._pending_rgb.pop(0)
+            if self._diagnostic_pink_enabled:
+                self._diagnostic_pink_pixel_count = (
+                    self._pipeline.diagnostic_pink_count(
+                        values,
+                        self._diagnostic_pink_config,
+                    )
+                )
+            self._geometric_degradation_reason = result.degradation_reason
+            self._processed_rgb_count += 1
+            self._latest_processed_rgb_stamp_ns = max(
+                self._latest_processed_rgb_stamp_ns,
+                stamp_ns,
             )
+            self._last_cable_candidate_count = len(result.candidates)
+            rgb_confirmed = [
+                confirmed
+                for confirmed in result.confirmed
+                if EvidenceSource.RGB_CABLE in confirmed.evidence
+            ]
+            if rgb_confirmed:
+                self._rgb_cable_confirmation_count += len(rgb_confirmed)
+                self._confirmed_observation_count += len(rgb_confirmed)
+                self._latest_confirmation_spread_m = max(
+                    confirmed.spatial_spread_m for confirmed in rgb_confirmed
+                )
+            self._publish_candidate_reports(result.candidate_reports)
+            self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
             self._publish_health()
-            return
-        result = self._pipeline.process_rgb(stamp_ns, values)
-        if result is None:
-            self._geometric_degradation_reason = "ground:unavailable"
-            self._publish_health()
-            return
-        if self._diagnostic_pink_enabled:
-            self._diagnostic_pink_pixel_count = self._pipeline.diagnostic_pink_count(
-                values,
-                self._diagnostic_pink_config,
-            )
-        self._pending_rgb = None
-        self._geometric_degradation_reason = result.degradation_reason
-        self._processed_rgb_count += 1
-        self._latest_processed_rgb_stamp_ns = stamp_ns
-        self._last_cable_candidate_count = len(result.candidates)
-        rgb_confirmed = [
-            confirmed
-            for confirmed in result.confirmed
-            if EvidenceSource.RGB_CABLE in confirmed.evidence
-        ]
-        if rgb_confirmed:
-            self._rgb_cable_confirmation_count += len(rgb_confirmed)
-            self._confirmed_observation_count += len(rgb_confirmed)
-            self._latest_confirmation_spread_m = max(
-                confirmed.spatial_spread_m for confirmed in rgb_confirmed
-            )
-        self._publish_candidate_reports(result.candidate_reports)
-        self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
-        self._publish_health()
 
     def _block_new_confirmation(self, reason: str) -> None:
         self._pipeline.suspend_confirmed_expiry()
@@ -677,6 +703,8 @@ class GeometricHazardNode(InputHealthNode):
                     self._pipeline.tracker.config.minimum_rgb_confirmation_confidence
                 ),
                 "cable.pending_rgb_drops": self._pending_rgb_drop_count,
+                "cable.pending_rgb_count": len(self._pending_rgb),
+                "cable.rgb_reorder_capacity": self._rgb_reorder_capacity,
                 "cable.processed_rgb_count": self._processed_rgb_count,
                 "cable.latest_processed_rgb_stamp_ns": (
                     self._latest_processed_rgb_stamp_ns
