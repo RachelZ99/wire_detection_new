@@ -17,6 +17,7 @@ geometric_hazard:
     tf_static_topic: /tf_static
     health_topic: /low_profile_hazard_perception/health
     hazard_cloud_topic: /low_profile_hazard_perception/confirmed_hazards
+    candidate_diagnostics_topic: /low_profile_hazard_perception/candidate_diagnostics
 
     # Observed-ground profile for the measured 640x360 DCW2 stream.
     ground_sample_stride_px: 6
@@ -37,6 +38,17 @@ geometric_hazard:
     strong_minimum_support_points: 18
     strong_minimum_spatial_span_m: 0.04
     geometry_cluster_cell_m: 0.04
+
+    # Weak height and narrow continuous invalid depth are support-only.
+    # They can strengthen a matching cable shape but never confirm alone.
+    depth_evidence_sample_stride_px: 1
+    weak_height_m: 0.006
+    weak_ground_noise_multiplier: 3.0
+    weak_minimum_support_points: 8
+    weak_minimum_spatial_span_m: 0.04
+    invalid_depth_minimum_pixels: 12
+    invalid_depth_minimum_span_px: 12.0
+    invalid_depth_maximum_width_px: 8.0
 
     # Formal RGB cable path: local paired-edge structure at native 640x360.
     # No parameter encodes a cable color and there is no large area gate.
@@ -62,6 +74,7 @@ geometric_hazard:
     # Confirmation happens only after observation-time alignment in odom.
     association_radius_m: 0.08
     confirmation_window_ms: 350.0
+    minimum_rgb_confirmation_confidence: 0.75
     candidate_retention_ms: 500.0
     # Safety floor: confirmed hazards survive the measured observation blind
     # zone for at least two seconds, even while sensing is degraded.

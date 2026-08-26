@@ -13,16 +13,19 @@ from .cable import (
     TrainingFreeCableDetector,
     diagnostic_pink_pixel_count,
 )
+from .depth_evidence import DepthEvidenceConfig, DepthEvidenceDetector
 from .geometry import (
     CameraIntrinsics,
     GeometricCandidate,
     GroundEstimate,
+    GroundQualityMetrics,
     GroundEstimator,
     GroundEstimatorConfig,
     StrongGeometryConfig,
     StrongGeometryDetector,
 )
 from .temporal import (
+    CandidateDecisionReason,
     ConfirmedHazard,
     EvidenceSource,
     HazardObservation,
@@ -40,6 +43,7 @@ class GeometricPipelineResult:
     candidates: tuple[GeometricCandidate, ...]
     confirmed: tuple[ConfirmedHazard, ...]
     retained: tuple[ConfirmedHazard, ...]
+    candidate_reports: tuple["CandidateReport", ...]
     nominal_ground_angle_error_degrees: float | None
     degradation_reason: str = ""
 
@@ -51,6 +55,7 @@ class RgbCablePipelineResult:
     candidates: tuple[CableCandidate, ...]
     confirmed: tuple[ConfirmedHazard, ...]
     retained: tuple[ConfirmedHazard, ...]
+    candidate_reports: tuple["CandidateReport", ...]
     degradation_reason: str = ""
 
 
@@ -61,6 +66,18 @@ class ObservedFloorSnapshot:
     region: ObservedFloorRegion
 
 
+@dataclass(frozen=True)
+class CandidateReport:
+    sensor_stamp_ns: int
+    centroid_odom: tuple[float, float, float]
+    evidence_sources: tuple[EvidenceSource, ...]
+    ground_accepted: bool
+    ground_reason: str
+    ground_quality: GroundQualityMetrics
+    confidence: float
+    decision_reason: CandidateDecisionReason
+
+
 class GeometricHazardPipeline:
     """Own the explicitly asynchronous geometry/alignment/confirmation path."""
 
@@ -69,11 +86,13 @@ class GeometricHazardPipeline:
         *,
         ground_config: GroundEstimatorConfig | None = None,
         geometry_config: StrongGeometryConfig | None = None,
+        depth_evidence_config: DepthEvidenceConfig | None = None,
         cable_config: TrainingFreeCableConfig | None = None,
         tracker_config: HazardTrackerConfig | None = None,
     ) -> None:
         self.ground_estimator = GroundEstimator(ground_config)
         self.geometry_detector = StrongGeometryDetector(geometry_config)
+        self.depth_evidence_detector = DepthEvidenceDetector(depth_evidence_config)
         self.cable_detector = TrainingFreeCableDetector(cable_config)
         self.odom = OdomPoseCache()
         self.tracker = HazardTracker(tracker_config)
@@ -108,9 +127,7 @@ class GeometricHazardPipeline:
             self._pending_alignment_reason = reason
         return reason
 
-    def retained_at(
-        self, sensor_now_ns: int
-    ) -> tuple[ConfirmedHazard, ...]:
+    def retained_at(self, sensor_now_ns: int) -> tuple[ConfirmedHazard, ...]:
         return self.tracker.retained_at(
             sensor_now_ns,
             allow_confirmed_expiry=not self._confirmed_expiry_suspended,
@@ -167,10 +184,8 @@ class GeometricHazardPipeline:
             depth_unit_m=depth_unit_m,
             nominal_camera_height_m=self.nominal_camera_height_m,
         )
-        nominal_angle_error = (
-            self.base_from_camera.normal_error_to_parent_up_degrees(
-                ground.model.normal
-            )
+        nominal_angle_error = self.base_from_camera.normal_error_to_parent_up_degrees(
+            ground.model.normal
         )
         if not ground.accepted:
             self._suspend_confirmation()
@@ -184,21 +199,23 @@ class GeometricHazardPipeline:
                     sensor_stamp_ns,
                     allow_confirmed_expiry=False,
                 ),
+                candidate_reports=(),
                 nominal_ground_angle_error_degrees=nominal_angle_error,
                 degradation_reason=f"ground:{ground.reason}",
             )
         observed_base_from_camera = self.base_from_camera.with_observed_ground(
             ground.model.normal, ground.model.camera_height_m
         )
+        floor_region = ObservedFloorRegion.from_depth(
+            depth_values,
+            self.intrinsics,
+            ground.model,
+            depth_unit_m=depth_unit_m,
+        )
         self._latest_floor = ObservedFloorSnapshot(
             sensor_stamp_ns=sensor_stamp_ns,
             estimate=ground,
-            region=ObservedFloorRegion.from_depth(
-                depth_values,
-                self.intrinsics,
-                ground.model,
-                depth_unit_m=depth_unit_m,
-            ),
+            region=floor_region,
         )
         odom_from_camera = odom_from_base.compose(observed_base_from_camera)
         candidates = self.geometry_detector.detect(
@@ -207,19 +224,40 @@ class GeometricHazardPipeline:
             ground.model,
             depth_unit_m=depth_unit_m,
         )
-        confirmed, degradation_reason = self._track_observations(
+        depth_evidence = self.depth_evidence_detector.detect(
+            depth_values,
+            self.intrinsics,
+            ground.model,
+            floor_region,
+            depth_unit_m=depth_unit_m,
+            ground_noise_m=ground.metrics.p90_residual_m / 1.645,
+        )
+        confirmed, candidate_reports, degradation_reason = self._track_observations(
             tuple(
                 HazardObservation(
                     sensor_stamp_ns=sensor_stamp_ns,
                     points_odom=tuple(
-                        odom_from_camera.transform_point(point)
+                        _stable_point(odom_from_camera.transform_point(point))
                         for point in candidate.points
                     ),
                     evidence=EvidenceSource.STRONG_GEOMETRY,
                     confidence=candidate.confidence,
                 )
                 for candidate in candidates
+            )
+            + tuple(
+                HazardObservation(
+                    sensor_stamp_ns=sensor_stamp_ns,
+                    points_odom=tuple(
+                        _stable_point(odom_from_camera.transform_point(point))
+                        for point in candidate.points_camera
+                    ),
+                    evidence=candidate.evidence,
+                    confidence=candidate.confidence,
+                )
+                for candidate in depth_evidence
             ),
+            ground=ground,
             degradation_reason=degradation_reason,
         )
         return GeometricPipelineResult(
@@ -229,10 +267,9 @@ class GeometricHazardPipeline:
             confirmed=tuple(confirmed),
             retained=self.tracker.retained_at(
                 sensor_stamp_ns,
-                allow_confirmed_expiry=(
-                    not self._confirmed_expiry_suspended
-                ),
+                allow_confirmed_expiry=(not self._confirmed_expiry_suspended),
             ),
+            candidate_reports=candidate_reports,
             nominal_ground_angle_error_degrees=nominal_angle_error,
             degradation_reason=degradation_reason,
         )
@@ -283,6 +320,7 @@ class GeometricHazardPipeline:
                     sensor_stamp_ns,
                     allow_confirmed_expiry=False,
                 ),
+                candidate_reports=(),
                 degradation_reason="ground:stale",
             )
         candidates = self.cable_detector.detect(
@@ -296,12 +334,12 @@ class GeometricHazardPipeline:
             floor.estimate.model.camera_height_m,
         )
         odom_from_camera = alignment.pose.compose(observed_base_from_camera)
-        confirmed, degradation_reason = self._track_observations(
+        confirmed, candidate_reports, degradation_reason = self._track_observations(
             tuple(
                 HazardObservation(
                     sensor_stamp_ns=sensor_stamp_ns,
                     points_odom=tuple(
-                        odom_from_camera.transform_point(point)
+                        _stable_point(odom_from_camera.transform_point(point))
                         for point in candidate.points_camera
                     ),
                     evidence=EvidenceSource.RGB_CABLE,
@@ -309,6 +347,7 @@ class GeometricHazardPipeline:
                 )
                 for candidate in candidates
             ),
+            ground=floor.estimate,
             degradation_reason=degradation_reason,
         )
         return RgbCablePipelineResult(
@@ -318,10 +357,9 @@ class GeometricHazardPipeline:
             confirmed=tuple(confirmed),
             retained=self.tracker.retained_at(
                 sensor_stamp_ns,
-                allow_confirmed_expiry=(
-                    not self._confirmed_expiry_suspended
-                ),
+                allow_confirmed_expiry=(not self._confirmed_expiry_suspended),
             ),
+            candidate_reports=candidate_reports,
             degradation_reason=degradation_reason,
         )
 
@@ -329,28 +367,37 @@ class GeometricHazardPipeline:
         self,
         observations: tuple[HazardObservation, ...],
         *,
+        ground: GroundEstimate,
         degradation_reason: str,
-    ) -> tuple[tuple[ConfirmedHazard, ...], str]:
+    ) -> tuple[tuple[ConfirmedHazard, ...], tuple[CandidateReport, ...], str,]:
         """Apply one shared confirmation/recovery lifecycle to all evidence."""
         reconfirmation_required = self._confirmed_expiry_suspended
         confirmed: list[ConfirmedHazard] = []
+        reports: list[CandidateReport] = []
         for observation in observations:
-            confirmed.extend(
-                self.tracker.observe(
-                    observation,
-                    allow_confirmed_expiry=(
-                        not self._confirmed_expiry_suspended
-                    ),
-                    require_reconfirmation_for_confirmed=(
-                        reconfirmation_required
-                    ),
+            decision = self.tracker.observe_with_decision(
+                observation,
+                allow_confirmed_expiry=(not self._confirmed_expiry_suspended),
+                require_reconfirmation_for_confirmed=(reconfirmation_required),
+            )
+            confirmed.extend(decision.confirmed)
+            reports.append(
+                CandidateReport(
+                    sensor_stamp_ns=observation.sensor_stamp_ns,
+                    centroid_odom=observation.centroid,
+                    evidence_sources=decision.evidence,
+                    ground_accepted=ground.accepted,
+                    ground_reason=ground.reason,
+                    ground_quality=ground.metrics,
+                    confidence=decision.confidence,
+                    decision_reason=decision.decision_reason,
                 )
             )
         if confirmed and not degradation_reason:
             self._confirmed_expiry_suspended = False
         elif reconfirmation_required and not degradation_reason:
             degradation_reason = "recovery:reconfirmation_required"
-        return tuple(confirmed), degradation_reason
+        return tuple(confirmed), tuple(reports), degradation_reason
 
     def diagnostic_pink_count(
         self,
@@ -366,3 +413,10 @@ class GeometricHazardPipeline:
             self._latest_floor.region,
             config,
         )
+
+
+def _stable_point(
+    point: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """Keep odom evidence deterministic below meaningful spatial precision."""
+    return tuple(round(value, 4) for value in point)

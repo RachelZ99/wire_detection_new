@@ -213,8 +213,9 @@ observation's sensor stamp. The node publishes no slowdown, stop, or replanning
 command, and it exposes no candidate cloud on the operational topic. Alongside
 standard `x/y/z`, each operational point carries the confirmation's
 `confirmation_spread` and an `evidence_mask` (`1` for strong geometry, `2` for
-RGB cable evidence) so replay can reject every misaligned event and identify
-the evidence carried by each retained shape.
+RGB cable shape, `4` for weak height, and `8` for continuous invalid depth) so
+replay can reject every misaligned event and identify the evidence carried by
+each retained shape.
 
 The internal field remains named `sensor_stamp_ns` intentionally: the current
 DCW2 profile has `use_hardware_time: false`, and the repository has not yet
@@ -254,6 +255,36 @@ long shadows, one-pixel floor seams, hanging/background wires, table/tripod
 legs, and cable reflections. The positive set covers pale and white cables at
 2--5 px, including missing depth along the cable pixels. These are home
 feasibility fixtures, not factory validation.
+
+## Asynchronous mixed-evidence fusion
+
+Depth frames keep strong protrusions, weak height, and invalid depth as separate
+evidence sources. Weak height begins at the greater of 6 mm or three estimated
+robust ground-noise deviations and remains below the 15 mm strong geometry
+gate. Invalid depth is accepted as support only when it forms a narrow,
+continuous region enclosed by valid observed-floor depth; scattered or broad
+holes do not become candidates.
+
+The `odom` tracker accepts cross-stream observations in sensor-stamp order or
+arrival order and converges on the same retained hazard. Two strong geometry
+observations, two RGB cable observations at or above confidence 0.75, or one
+strong geometry plus one high-confidence RGB observation can confirm. Weak
+height, low-confidence RGB, and invalid depth can strengthen a spatially
+matching cable track but never count as a confirming observation. Two candidate
+components from the same sensor stamp count as one observation. Odom evidence
+coordinates are canonicalized at 0.1 mm, below meaningful detection precision,
+to prevent insignificant floor-fit floating-point jitter from changing replay
+bytes.
+
+Every generated candidate is published separately on
+`/low_profile_hazard_perception/candidate_diagnostics` as a
+`diagnostic_msgs/DiagnosticArray`. Each status carries its own sensor stamp,
+`odom` centroid, aggregate evidence sources, observed-ground acceptance and
+quality metrics, confidence, and a stable decision reason such as
+`SUPPORT_ONLY`, `LOW_CONFIDENCE_RGB`, `WAITING_FOR_CONFIRMATION`, or
+`CONFIRMED_MIXED_EVIDENCE`. This debug topic is not the operational navigation
+interface; only retained confirmed hazards appear on
+`/low_profile_hazard_perception/confirmed_hazards`.
 
 ## Conservative degradation and retention
 

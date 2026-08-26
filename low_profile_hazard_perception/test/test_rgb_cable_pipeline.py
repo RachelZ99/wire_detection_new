@@ -11,6 +11,7 @@ from low_profile_hazard_perception.geometry import (
     StrongGeometryConfig,
 )
 from low_profile_hazard_perception.temporal import (
+    CandidateDecisionReason,
     EvidenceSource,
     HazardTrackerConfig,
     Pose3,
@@ -32,9 +33,7 @@ def _floor_depth(intrinsics: CameraIntrinsics) -> list[int]:
                 left * right for left, right in zip(normal, ray, strict=True)
             )
             depth.append(
-                0
-                if denominator >= -1e-6
-                else int(round(-0.225 / denominator * 1000.0))
+                0 if denominator >= -1e-6 else int(round(-0.225 / denominator * 1000.0))
             )
     return depth
 
@@ -48,7 +47,169 @@ def _cable_rgb(intrinsics: CameraIntrinsics, center_column: int) -> bytes:
     return bytes(data)
 
 
+def _mixed_depth_evidence(intrinsics: CameraIntrinsics) -> list[int]:
+    depth = _floor_depth(intrinsics)
+    pitch = math.radians(3.0)
+    normal = (0.0, -math.cos(pitch), -math.sin(pitch))
+    for row in range(48, 69):
+        for column in range(57, 60):
+            ray = (
+                (column - intrinsics.cx) / intrinsics.fx,
+                (row - intrinsics.cy) / intrinsics.fy,
+                1.0,
+            )
+            denominator = sum(
+                left * right for left, right in zip(normal, ray, strict=True)
+            )
+            depth[row * intrinsics.width + column] = int(
+                round((0.009 - 0.225) / denominator * 1000.0)
+            )
+        for column in range(60, 63):
+            depth[row * intrinsics.width + column] = 0
+    return depth
+
+
 class RgbCablePipelineTests(unittest.TestCase):
+    def test_mixed_pipeline_final_output_is_arrival_order_independent(self) -> None:
+        intrinsics = CameraIntrinsics(
+            width=120,
+            height=72,
+            fx=100.0,
+            fy=100.0,
+            cx=60.0,
+            cy=36.0,
+        )
+
+        def make_pipeline() -> GeometricHazardPipeline:
+            pipeline = GeometricHazardPipeline(
+                ground_config=GroundEstimatorConfig(
+                    sample_stride_px=3,
+                    ransac_iterations=100,
+                    minimum_support=180,
+                    minimum_inlier_ratio=0.65,
+                    minimum_spatial_coverage=0.30,
+                ),
+                geometry_config=StrongGeometryConfig(
+                    sample_stride_px=1,
+                    minimum_support_points=24,
+                ),
+                cable_config=TrainingFreeCableConfig(
+                    minimum_component_pixels=12,
+                    minimum_length_px=12.0,
+                    minimum_physical_span_m=0.04,
+                ),
+            )
+            pipeline.set_intrinsics(intrinsics)
+            pipeline.set_rgb_intrinsics(intrinsics)
+            pipeline.set_base_from_camera(
+                Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0))
+            )
+            for stamp_ns in range(
+                850_000_000, 1_351_000_000, 50_000_000
+            ):
+                pipeline.add_odom(stamp_ns, Pose3.identity())
+            initial = pipeline.process_depth(
+                900_000_000, _floor_depth(intrinsics)
+            )
+            assert initial is not None and initial.ground.accepted
+            return pipeline
+
+        outcomes = []
+        for order in (
+            ("depth", "early_rgb", "late_rgb"),
+            ("late_rgb", "early_rgb", "depth"),
+        ):
+            pipeline = make_pipeline()
+            for source in order:
+                if source == "depth":
+                    pipeline.process_depth(
+                        1_050_000_000, _mixed_depth_evidence(intrinsics)
+                    )
+                elif source == "early_rgb":
+                    pipeline.process_rgb(
+                        1_000_000_000, _cable_rgb(intrinsics, 60)
+                    )
+                else:
+                    pipeline.process_rgb(
+                        1_200_000_000, _cable_rgb(intrinsics, 60)
+                    )
+            outcomes.append(pipeline.retained_at(1_200_000_000))
+
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(len(outcomes[0]), 1)
+        self.assertEqual(
+            outcomes[0][0].evidence,
+            (
+                EvidenceSource.INVALID_DEPTH,
+                EvidenceSource.RGB_CABLE,
+                EvidenceSource.WEAK_HEIGHT,
+            ),
+        )
+
+    def test_weak_height_and_continuous_invalid_depth_strengthen_rgb(self) -> None:
+        intrinsics = CameraIntrinsics(
+            width=120,
+            height=72,
+            fx=100.0,
+            fy=100.0,
+            cx=60.0,
+            cy=36.0,
+        )
+        pipeline = GeometricHazardPipeline(
+            ground_config=GroundEstimatorConfig(
+                sample_stride_px=3,
+                ransac_iterations=100,
+                minimum_support=180,
+                minimum_inlier_ratio=0.65,
+                minimum_spatial_coverage=0.30,
+            ),
+            geometry_config=StrongGeometryConfig(
+                sample_stride_px=1,
+                minimum_support_points=24,
+            ),
+            cable_config=TrainingFreeCableConfig(
+                minimum_component_pixels=12,
+                minimum_length_px=12.0,
+                minimum_physical_span_m=0.04,
+            ),
+        )
+        pipeline.set_intrinsics(intrinsics)
+        pipeline.set_rgb_intrinsics(intrinsics)
+        pipeline.set_base_from_camera(Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0)))
+        for stamp_ns in range(950_000_000, 1_351_000_000, 50_000_000):
+            pipeline.add_odom(stamp_ns, Pose3.identity())
+
+        depth = pipeline.process_depth(1_050_000_000, _mixed_depth_evidence(intrinsics))
+        first_rgb = pipeline.process_rgb(1_000_000_000, _cable_rgb(intrinsics, 60))
+        second_rgb = pipeline.process_rgb(1_200_000_000, _cable_rgb(intrinsics, 60))
+
+        assert depth is not None and first_rgb is not None
+        assert second_rgb is not None
+        self.assertEqual(depth.candidates, ())
+        self.assertTrue(
+            any(
+                report.decision_reason is CandidateDecisionReason.SUPPORT_ONLY
+                for report in depth.candidate_reports
+            )
+        )
+        self.assertEqual(len(second_rgb.confirmed), 1)
+        self.assertEqual(
+            second_rgb.confirmed[0].evidence,
+            (
+                EvidenceSource.INVALID_DEPTH,
+                EvidenceSource.RGB_CABLE,
+                EvidenceSource.WEAK_HEIGHT,
+            ),
+        )
+        report = second_rgb.candidate_reports[0]
+        self.assertTrue(report.ground_accepted)
+        self.assertGreater(report.ground_quality.inlier_ratio, 0.65)
+        self.assertGreater(report.confidence, 0.85)
+        self.assertEqual(
+            report.decision_reason,
+            CandidateDecisionReason.CONFIRMED_MIXED_EVIDENCE,
+        )
+
     def test_rejected_ground_revokes_rgb_projection_support(self) -> None:
         intrinsics = CameraIntrinsics(
             width=120,
@@ -74,9 +235,7 @@ class RgbCablePipelineTests(unittest.TestCase):
         )
         pipeline.set_intrinsics(intrinsics)
         pipeline.set_rgb_intrinsics(intrinsics)
-        pipeline.set_base_from_camera(
-            Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0))
-        )
+        pipeline.set_base_from_camera(Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0)))
         for stamp_ns in range(950_000_000, 1_351_000_000, 100_000_000):
             pipeline.add_odom(stamp_ns, Pose3.identity())
         accepted = pipeline.process_depth(
@@ -124,9 +283,7 @@ class RgbCablePipelineTests(unittest.TestCase):
         )
         pipeline.set_intrinsics(intrinsics)
         pipeline.set_rgb_intrinsics(intrinsics)
-        pipeline.set_base_from_camera(
-            Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0))
-        )
+        pipeline.set_base_from_camera(Pose3((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0)))
         for stamp_ns in range(950_000_000, 1_751_000_000, 100_000_000):
             pipeline.add_odom(stamp_ns, Pose3.identity())
         ground_result = pipeline.process_depth(

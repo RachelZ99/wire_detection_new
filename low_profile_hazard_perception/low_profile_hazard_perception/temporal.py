@@ -35,9 +35,7 @@ class Pose3:
 
     def transform_point(self, point: Point3) -> Point3:
         rotated = _rotate(self.rotation, point)
-        return tuple(
-            rotated[index] + self.translation[index] for index in range(3)
-        )
+        return tuple(rotated[index] + self.translation[index] for index in range(3))
 
     def compose(self, local: "Pose3") -> "Pose3":
         """Return this transform followed by a child-to-local transform."""
@@ -99,9 +97,7 @@ class OdomPoseCache:
         if maximum_translation_jump_m <= 0.0:
             raise ValueError("maximum_translation_jump_m must be positive")
         if not 0.0 < maximum_rotation_jump_degrees <= 180.0:
-            raise ValueError(
-                "maximum_rotation_jump_degrees must be in (0, 180]"
-            )
+            raise ValueError("maximum_rotation_jump_degrees must be in (0, 180]")
         self._maximum_samples = maximum_samples
         self._maximum_age_ns = maximum_age_ns
         self._maximum_interpolation_gap_ns = maximum_interpolation_gap_ns
@@ -138,10 +134,7 @@ class OdomPoseCache:
         pose = pose.normalized()
         self._last_arrival_stamp_ns = sensor_stamp_ns
         index = bisect_left(self._stamps, sensor_stamp_ns)
-        if (
-            index < len(self._stamps)
-            and self._stamps[index] == sensor_stamp_ns
-        ):
+        if index < len(self._stamps) and self._stamps[index] == sensor_stamp_ns:
             self._poses[index] = pose
         else:
             self._stamps.insert(index, sensor_stamp_ns)
@@ -165,10 +158,7 @@ class OdomPoseCache:
         if len(self._stamps) < 2:
             return OdomAlignment(None, "odom:missing")
         upper = bisect_left(self._stamps, sensor_stamp_ns)
-        if (
-            upper < len(self._stamps)
-            and self._stamps[upper] == sensor_stamp_ns
-        ):
+        if upper < len(self._stamps) and self._stamps[upper] == sensor_stamp_ns:
             supported = (
                 upper > 0 and self._segment_is_supported(upper - 1, upper)
             ) or (
@@ -199,9 +189,7 @@ class OdomPoseCache:
             )
         )
 
-    def continuous_between(
-        self, first_stamp_ns: int, second_stamp_ns: int
-    ) -> bool:
+    def continuous_between(self, first_stamp_ns: int, second_stamp_ns: int) -> bool:
         """Check every odom segment spanning two observation stamps."""
         if first_stamp_ns > second_stamp_ns:
             first_stamp_ns, second_stamp_ns = (
@@ -238,9 +226,7 @@ class OdomPoseCache:
         rotation_dot = abs(
             sum(
                 left * right
-                for left, right in zip(
-                    first.rotation, second.rotation, strict=True
-                )
+                for left, right in zip(first.rotation, second.rotation, strict=True)
             )
         )
         rotation_jump = degrees(2.0 * acos(max(-1.0, min(1.0, rotation_dot))))
@@ -253,6 +239,8 @@ class OdomPoseCache:
 class EvidenceSource(str, Enum):
     STRONG_GEOMETRY = "STRONG_GEOMETRY"
     RGB_CABLE = "RGB_CABLE"
+    WEAK_HEIGHT = "WEAK_HEIGHT"
+    INVALID_DEPTH = "INVALID_DEPTH"
 
 
 class EvidenceMask(IntFlag):
@@ -261,17 +249,32 @@ class EvidenceMask(IntFlag):
     NONE = 0
     STRONG_GEOMETRY = 1
     RGB_CABLE = 2
+    WEAK_HEIGHT = 4
+    INVALID_DEPTH = 8
 
     @classmethod
-    def from_sources(
-        cls, sources: tuple[EvidenceSource, ...]
-    ) -> "EvidenceMask":
+    def from_sources(cls, sources: tuple[EvidenceSource, ...]) -> "EvidenceMask":
         mask = cls.NONE
         if EvidenceSource.STRONG_GEOMETRY in sources:
             mask |= cls.STRONG_GEOMETRY
         if EvidenceSource.RGB_CABLE in sources:
             mask |= cls.RGB_CABLE
+        if EvidenceSource.WEAK_HEIGHT in sources:
+            mask |= cls.WEAK_HEIGHT
+        if EvidenceSource.INVALID_DEPTH in sources:
+            mask |= cls.INVALID_DEPTH
         return mask
+
+
+class CandidateDecisionReason(str, Enum):
+    INVALID_SENSOR_STAMP = "INVALID_SENSOR_STAMP"
+    DUPLICATE_OBSERVATION = "DUPLICATE_OBSERVATION"
+    SUPPORT_ONLY = "SUPPORT_ONLY"
+    LOW_CONFIDENCE_RGB = "LOW_CONFIDENCE_RGB"
+    WAITING_FOR_CONFIRMATION = "WAITING_FOR_CONFIRMATION"
+    CONFIRMED_STRONG_GEOMETRY = "CONFIRMED_STRONG_GEOMETRY"
+    CONFIRMED_RGB_CABLE = "CONFIRMED_RGB_CABLE"
+    CONFIRMED_MIXED_EVIDENCE = "CONFIRMED_MIXED_EVIDENCE"
 
 
 @dataclass(frozen=True)
@@ -286,8 +289,7 @@ class HazardObservation:
         if not self.points_odom:
             raise ValueError("hazard observation needs at least one point")
         return tuple(
-            sum(point[axis] for point in self.points_odom)
-            / len(self.points_odom)
+            sum(point[axis] for point in self.points_odom) / len(self.points_odom)
             for axis in range(3)
         )
 
@@ -304,11 +306,20 @@ class ConfirmedHazard:
 
 
 @dataclass(frozen=True)
+class TrackingDecision:
+    confirmed: tuple[ConfirmedHazard, ...]
+    evidence: tuple[EvidenceSource, ...]
+    confidence: float
+    decision_reason: CandidateDecisionReason
+
+
+@dataclass(frozen=True)
 class HazardTrackerConfig:
     association_radius_m: float = 0.08
     confirmation_window_ns: int = 350_000_000
     candidate_retention_ns: int = 500_000_000
     confirmed_retention_ns: int = 2_000_000_000
+    minimum_rgb_confirmation_confidence: float = 0.75
 
     def __post_init__(self) -> None:
         if self.association_radius_m <= 0.0:
@@ -318,9 +329,9 @@ class HazardTrackerConfig:
         if self.candidate_retention_ns <= 0:
             raise ValueError("candidate_retention_ns must be positive")
         if self.confirmed_retention_ns < 2_000_000_000:
-            raise ValueError(
-                "confirmed_retention_ns must be at least two seconds"
-            )
+            raise ValueError("confirmed_retention_ns must be at least two seconds")
+        if not 0.0 <= self.minimum_rgb_confirmation_confidence <= 1.0:
+            raise ValueError("minimum_rgb_confirmation_confidence must be in [0, 1]")
 
 
 @dataclass
@@ -329,21 +340,28 @@ class _Track:
     last_stamp_ns: int
     observation_centroids: list[Point3]
     latest_points: tuple[Point3, ...]
+    latest_points_stamp_ns: int
+    support_centroids: list[Point3] = field(default_factory=list)
+    confirmation_stamps: set[int] = field(default_factory=set)
+    observation_keys: set[tuple[int, EvidenceSource, Point3]] = field(
+        default_factory=set
+    )
     evidence: set[EvidenceSource] = field(default_factory=set)
     confidence: float = 0.0
     confirmed: bool = False
     refresh_centroids: list[Point3] = field(default_factory=list)
     refresh_last_stamp_ns: int | None = None
     refresh_latest_points: tuple[Point3, ...] = ()
+    refresh_latest_points_stamp_ns: int | None = None
+    refresh_stamps: set[int] = field(default_factory=set)
     refresh_evidence: set[EvidenceSource] = field(default_factory=set)
     refresh_confidence: float = 0.0
 
     @property
     def centroid(self) -> Point3:
+        points = sorted(self.observation_centroids or self.support_centroids)
         return tuple(
-            sum(point[axis] for point in self.observation_centroids)
-            / len(self.observation_centroids)
-            for axis in range(3)
+            sum(point[axis] for point in points) / len(points) for axis in range(3)
         )
 
 
@@ -353,9 +371,11 @@ class HazardTracker:
     def __init__(self, config: HazardTrackerConfig | None = None) -> None:
         self.config = config or HazardTrackerConfig()
         self._tracks: list[_Track] = []
+        self._latest_sensor_stamp_ns = 0
 
     def clear(self) -> None:
         self._tracks.clear()
+        self._latest_sensor_stamp_ns = 0
 
     def clear_candidates(self) -> None:
         """Discard unconfirmed accumulation without clearing known hazards."""
@@ -375,9 +395,7 @@ class HazardTracker:
             expire_confirmed=allow_confirmed_expiry,
         )
         return tuple(
-            self._confirmed_hazard(track)
-            for track in self._tracks
-            if track.confirmed
+            self._confirmed_hazard(track) for track in self._tracks if track.confirmed
         )
 
     def candidate_count_at(self, sensor_now_ns: int) -> int:
@@ -392,11 +410,33 @@ class HazardTracker:
         allow_confirmed_expiry: bool = True,
         require_reconfirmation_for_confirmed: bool = False,
     ) -> tuple[ConfirmedHazard, ...]:
+        return self.observe_with_decision(
+            observation,
+            allow_confirmed_expiry=allow_confirmed_expiry,
+            require_reconfirmation_for_confirmed=(require_reconfirmation_for_confirmed),
+        ).confirmed
+
+    def observe_with_decision(
+        self,
+        observation: HazardObservation,
+        *,
+        allow_confirmed_expiry: bool = True,
+        require_reconfirmation_for_confirmed: bool = False,
+    ) -> TrackingDecision:
         if observation.sensor_stamp_ns <= 0:
-            return ()
+            return TrackingDecision(
+                confirmed=(),
+                evidence=(observation.evidence,),
+                confidence=observation.confidence,
+                decision_reason=CandidateDecisionReason.INVALID_SENSOR_STAMP,
+            )
         centroid = observation.centroid
+        can_confirm = self._can_confirm(observation)
+        self._latest_sensor_stamp_ns = max(
+            self._latest_sensor_stamp_ns, observation.sensor_stamp_ns
+        )
         self._expire_at(
-            observation.sensor_stamp_ns,
+            self._latest_sensor_stamp_ns,
             expire_confirmed=allow_confirmed_expiry,
         )
         if require_reconfirmation_for_confirmed:
@@ -404,83 +444,224 @@ class HazardTracker:
                 (self._distance(centroid, track.centroid), track)
                 for track in self._tracks
                 if track.confirmed
-                and observation.evidence in track.evidence
+                and self._evidence_compatible(track, observation.evidence)
                 and self._distance(centroid, track.centroid)
                 <= self.config.association_radius_m
             ]
             if confirmed_matching:
                 _, track = min(confirmed_matching, key=lambda item: item[0])
-                return self._observe_refresh(track, observation)
+                confirmed = self._observe_refresh(track, observation)
+                return self._decision(
+                    track,
+                    confirmed,
+                    (
+                        self._confirmation_reason(track)
+                        if confirmed
+                        else CandidateDecisionReason.WAITING_FOR_CONFIRMATION
+                    ),
+                )
         matching = [
             (self._distance(centroid, track.centroid), track)
             for track in self._tracks
-            if track.last_stamp_ns < observation.sensor_stamp_ns
-            and observation.evidence in track.evidence
-            and (
-                not track.confirmed
-                or not require_reconfirmation_for_confirmed
-            )
+            if self._evidence_compatible(track, observation.evidence)
+            and (not track.confirmed or not require_reconfirmation_for_confirmed)
             and (
                 track.confirmed
-                or observation.sensor_stamp_ns - track.last_stamp_ns
+                or max(track.last_stamp_ns, observation.sensor_stamp_ns)
+                - min(track.first_stamp_ns, observation.sensor_stamp_ns)
                 <= self.config.confirmation_window_ns
             )
         ]
         matching = [
-            item
-            for item in matching
-            if item[0] <= self.config.association_radius_m
+            item for item in matching if item[0] <= self.config.association_radius_m
         ]
         if matching:
             _, track = min(matching, key=lambda item: item[0])
-            track.last_stamp_ns = observation.sensor_stamp_ns
-            track.observation_centroids.append(centroid)
-            track.latest_points = observation.points_odom
+            observation_key = (
+                observation.sensor_stamp_ns,
+                observation.evidence,
+                centroid,
+            )
+            if observation_key in track.observation_keys:
+                return self._decision(
+                    track,
+                    (),
+                    CandidateDecisionReason.DUPLICATE_OBSERVATION,
+                )
+            track.observation_keys.add(observation_key)
+            track.first_stamp_ns = min(
+                track.first_stamp_ns, observation.sensor_stamp_ns
+            )
+            track.last_stamp_ns = max(track.last_stamp_ns, observation.sensor_stamp_ns)
+            counts_for_confirmation = (
+                can_confirm
+                and observation.sensor_stamp_ns not in track.confirmation_stamps
+            )
+            if not can_confirm:
+                track.support_centroids.append(centroid)
+            elif counts_for_confirmation:
+                track.observation_centroids.append(centroid)
+                track.confirmation_stamps.add(observation.sensor_stamp_ns)
+                if observation.sensor_stamp_ns >= track.latest_points_stamp_ns:
+                    track.latest_points = observation.points_odom
+                    track.latest_points_stamp_ns = observation.sensor_stamp_ns
             track.evidence.add(observation.evidence)
             track.confidence = max(track.confidence, observation.confidence)
         else:
+            counts_for_confirmation = can_confirm
             track = _Track(
                 first_stamp_ns=observation.sensor_stamp_ns,
                 last_stamp_ns=observation.sensor_stamp_ns,
-                observation_centroids=[centroid],
+                observation_centroids=[] if not can_confirm else [centroid],
                 latest_points=observation.points_odom,
+                latest_points_stamp_ns=observation.sensor_stamp_ns,
+                support_centroids=[centroid] if not can_confirm else [],
+                confirmation_stamps=(
+                    {observation.sensor_stamp_ns} if can_confirm else set()
+                ),
+                observation_keys={
+                    (
+                        observation.sensor_stamp_ns,
+                        observation.evidence,
+                        centroid,
+                    )
+                },
                 evidence={observation.evidence},
                 confidence=observation.confidence,
             )
             self._tracks.append(track)
-        if len(track.observation_centroids) < 2:
-            return ()
+        if len(track.observation_centroids) < 2 or not counts_for_confirmation:
+            reason = CandidateDecisionReason.WAITING_FOR_CONFIRMATION
+            if self._is_support(observation.evidence):
+                reason = CandidateDecisionReason.SUPPORT_ONLY
+            elif not can_confirm:
+                reason = CandidateDecisionReason.LOW_CONFIDENCE_RGB
+            return self._decision(track, (), reason)
         track.confirmed = True
-        return (self._confirmed_hazard(track),)
+        confirmed = (self._confirmed_hazard(track),)
+        return self._decision(track, confirmed, self._confirmation_reason(track))
+
+    def _decision(
+        self,
+        track: _Track,
+        confirmed: tuple[ConfirmedHazard, ...],
+        reason: CandidateDecisionReason,
+    ) -> TrackingDecision:
+        return TrackingDecision(
+            confirmed=confirmed,
+            evidence=tuple(sorted(track.evidence, key=lambda item: item.value)),
+            confidence=self._track_confidence(track),
+            decision_reason=reason,
+        )
+
+    @staticmethod
+    def _confirmation_reason(track: _Track) -> CandidateDecisionReason:
+        if track.evidence == {EvidenceSource.STRONG_GEOMETRY}:
+            return CandidateDecisionReason.CONFIRMED_STRONG_GEOMETRY
+        if track.evidence == {EvidenceSource.RGB_CABLE}:
+            return CandidateDecisionReason.CONFIRMED_RGB_CABLE
+        return CandidateDecisionReason.CONFIRMED_MIXED_EVIDENCE
+
+    @staticmethod
+    def _is_support(evidence: EvidenceSource) -> bool:
+        return evidence in (
+            EvidenceSource.WEAK_HEIGHT,
+            EvidenceSource.INVALID_DEPTH,
+        )
+
+    def _can_confirm(self, observation: HazardObservation) -> bool:
+        if observation.evidence is EvidenceSource.STRONG_GEOMETRY:
+            return True
+        return (
+            observation.evidence is EvidenceSource.RGB_CABLE
+            and observation.confidence
+            >= self.config.minimum_rgb_confirmation_confidence
+        )
+
+    @classmethod
+    def _evidence_compatible(cls, track: _Track, evidence: EvidenceSource) -> bool:
+        support_only = not track.observation_centroids
+        if cls._is_support(evidence):
+            return support_only or EvidenceSource.RGB_CABLE in track.evidence
+        if evidence is EvidenceSource.RGB_CABLE:
+            return support_only or bool(
+                track.evidence
+                & {
+                    EvidenceSource.RGB_CABLE,
+                    EvidenceSource.STRONG_GEOMETRY,
+                }
+            )
+        if evidence is EvidenceSource.STRONG_GEOMETRY:
+            return bool(
+                track.evidence
+                & {
+                    EvidenceSource.RGB_CABLE,
+                    EvidenceSource.STRONG_GEOMETRY,
+                }
+            )
+        return False
 
     def _observe_refresh(
         self, track: _Track, observation: HazardObservation
     ) -> tuple[ConfirmedHazard, ...]:
         centroid = observation.centroid
-        refresh_expired = (
-            track.refresh_last_stamp_ns is None
-            or observation.sensor_stamp_ns <= track.refresh_last_stamp_ns
-            or observation.sensor_stamp_ns - track.refresh_last_stamp_ns
+        if not self._can_confirm(observation):
+            observation_key = (
+                observation.sensor_stamp_ns,
+                observation.evidence,
+                centroid,
+            )
+            if observation_key in track.observation_keys:
+                return ()
+            track.observation_keys.add(observation_key)
+            track.support_centroids.append(centroid)
+            track.last_stamp_ns = max(track.last_stamp_ns, observation.sensor_stamp_ns)
+            track.evidence.add(observation.evidence)
+            track.confidence = max(track.confidence, observation.confidence)
+            return ()
+        if observation.sensor_stamp_ns in track.refresh_stamps:
+            return ()
+        refresh_expired = bool(track.refresh_stamps) and (
+            max(*track.refresh_stamps, observation.sensor_stamp_ns)
+            - min(*track.refresh_stamps, observation.sensor_stamp_ns)
             > self.config.confirmation_window_ns
         )
-        refresh_inconsistent = bool(track.refresh_centroids) and self._distance(
-            centroid,
-            self._centroid(track.refresh_centroids),
-        ) > self.config.association_radius_m
+        refresh_inconsistent = (
+            bool(track.refresh_centroids)
+            and self._distance(
+                centroid,
+                self._centroid(track.refresh_centroids),
+            )
+            > self.config.association_radius_m
+        )
         if refresh_expired or refresh_inconsistent:
             self._clear_refresh(track)
         track.refresh_centroids.append(centroid)
-        track.refresh_last_stamp_ns = observation.sensor_stamp_ns
-        track.refresh_latest_points = observation.points_odom
+        track.refresh_stamps.add(observation.sensor_stamp_ns)
+        track.refresh_last_stamp_ns = max(track.refresh_stamps)
+        if (
+            track.refresh_latest_points_stamp_ns is None
+            or observation.sensor_stamp_ns
+            >= track.refresh_latest_points_stamp_ns
+        ):
+            track.refresh_latest_points = observation.points_odom
+            track.refresh_latest_points_stamp_ns = observation.sensor_stamp_ns
         track.refresh_evidence.add(observation.evidence)
-        track.refresh_confidence = max(
-            track.refresh_confidence, observation.confidence
-        )
+        track.refresh_confidence = max(track.refresh_confidence, observation.confidence)
         if len(track.refresh_centroids) < 2:
             return ()
-        track.last_stamp_ns = observation.sensor_stamp_ns
+        track.last_stamp_ns = max(track.last_stamp_ns, *track.refresh_stamps)
         track.observation_centroids.extend(track.refresh_centroids)
-        track.latest_points = track.refresh_latest_points
+        track.confirmation_stamps.update(track.refresh_stamps)
+        if (
+            track.refresh_latest_points_stamp_ns is not None
+            and track.refresh_latest_points_stamp_ns
+            >= track.latest_points_stamp_ns
+        ):
+            track.latest_points = track.refresh_latest_points
+            track.latest_points_stamp_ns = (
+                track.refresh_latest_points_stamp_ns
+            )
         track.evidence.update(track.refresh_evidence)
         track.confidence = max(track.confidence, track.refresh_confidence)
         self._clear_refresh(track)
@@ -491,19 +672,18 @@ class HazardTracker:
         track.refresh_centroids.clear()
         track.refresh_last_stamp_ns = None
         track.refresh_latest_points = ()
+        track.refresh_latest_points_stamp_ns = None
+        track.refresh_stamps.clear()
         track.refresh_evidence.clear()
         track.refresh_confidence = 0.0
 
     @staticmethod
     def _centroid(points: list[Point3]) -> Point3:
         return tuple(
-            sum(point[axis] for point in points) / len(points)
-            for axis in range(3)
+            sum(point[axis] for point in points) / len(points) for axis in range(3)
         )
 
-    def _expire_at(
-        self, sensor_now_ns: int, *, expire_confirmed: bool = True
-    ) -> None:
+    def _expire_at(self, sensor_now_ns: int, *, expire_confirmed: bool = True) -> None:
         self._tracks = [
             track
             for track in self._tracks
@@ -525,22 +705,27 @@ class HazardTracker:
             for point in track.observation_centroids
         )
         return ConfirmedHazard(
-            sensor_stamp_ns=track.last_stamp_ns,
+            sensor_stamp_ns=track.latest_points_stamp_ns,
             points_odom=track.latest_points,
             centroid=track.centroid,
             observation_count=len(track.observation_centroids),
-            evidence=tuple(
-                sorted(track.evidence, key=lambda item: item.value)
-            ),
-            confidence=track.confidence,
+            evidence=tuple(sorted(track.evidence, key=lambda item: item.value)),
+            confidence=self._track_confidence(track),
             spatial_spread_m=spread,
         )
 
     @staticmethod
-    def _distance(first: Point3, second: Point3) -> float:
-        return sqrt(
-            sum((first[index] - second[index]) ** 2 for index in range(3))
+    def _track_confidence(track: _Track) -> float:
+        return min(
+            1.0,
+            track.confidence
+            + (0.05 if EvidenceSource.WEAK_HEIGHT in track.evidence else 0.0)
+            + (0.03 if EvidenceSource.INVALID_DEPTH in track.evidence else 0.0),
         )
+
+    @staticmethod
+    def _distance(first: Point3, second: Point3) -> float:
+        return sqrt(sum((first[index] - second[index]) ** 2 for index in range(3)))
 
 
 def _normalize(quaternion: Quaternion) -> Quaternion:
@@ -603,9 +788,7 @@ def _rotate(quaternion: Quaternion, point: Point3) -> Point3:
     return rotated[0], rotated[1], rotated[2]
 
 
-def _slerp(
-    first: Quaternion, second: Quaternion, fraction: float
-) -> Quaternion:
+def _slerp(first: Quaternion, second: Quaternion, fraction: float) -> Quaternion:
     first = _normalize(first)
     second = _normalize(second)
     dot = sum(left * right for left, right in zip(first, second, strict=True))

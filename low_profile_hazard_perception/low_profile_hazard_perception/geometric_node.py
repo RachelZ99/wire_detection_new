@@ -8,6 +8,7 @@ import sys
 from array import array
 
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from nav_msgs.msg import Odometry
 from rclpy.qos import (
     DurabilityPolicy,
@@ -20,7 +21,8 @@ from sensor_msgs.msg import Image, PointCloud2, PointField
 from tf2_msgs.msg import TFMessage
 
 from .cable import DiagnosticPinkConfig, TrainingFreeCableConfig
-from .geometric_pipeline import GeometricHazardPipeline
+from .depth_evidence import DepthEvidenceConfig
+from .geometric_pipeline import CandidateReport, GeometricHazardPipeline
 from .geometry import (
     CameraIntrinsics,
     GroundEstimate,
@@ -61,6 +63,7 @@ class GeometricHazardNode(InputHealthNode):
         self._confirmed_observation_count = 0
         self._latest_confirmation_spread_m: float | None = None
         self._cloud_publish_count = 0
+        self._candidate_publish_count = 0
         self._pending_depth_drop_count = 0
         self._processed_depth_count = 0
         self._pending_rgb_drop_count = 0
@@ -77,15 +80,11 @@ class GeometricHazardNode(InputHealthNode):
         super().__init__()
 
         self._diagnostic_pink_enabled = bool(
-            self.declare_parameter(
-                "diagnostic_pink_comparison_enabled", False
-            ).value
+            self.declare_parameter("diagnostic_pink_comparison_enabled", False).value
         )
         self._diagnostic_pink_config = DiagnosticPinkConfig(
             minimum_red=int(
-                self.declare_parameter(
-                    "diagnostic_pink_minimum_red", 90
-                ).value
+                self.declare_parameter("diagnostic_pink_minimum_red", 90).value
             ),
             minimum_red_over_green=int(
                 self.declare_parameter(
@@ -112,32 +111,22 @@ class GeometricHazardNode(InputHealthNode):
                 self.declare_parameter("ground_ransac_iterations", 160).value
             ),
             ransac_score_max_samples=int(
-                self.declare_parameter(
-                    "ground_ransac_score_max_samples", 1200
-                ).value
+                self.declare_parameter("ground_ransac_score_max_samples", 1200).value
             ),
             inlier_threshold_m=float(
-                self.declare_parameter(
-                    "ground_inlier_threshold_m", 0.008
-                ).value
+                self.declare_parameter("ground_inlier_threshold_m", 0.008).value
             ),
             minimum_support=int(
                 self.declare_parameter("ground_minimum_support", 500).value
             ),
             minimum_inlier_ratio=float(
-                self.declare_parameter(
-                    "ground_minimum_inlier_ratio", 0.70
-                ).value
+                self.declare_parameter("ground_minimum_inlier_ratio", 0.70).value
             ),
             maximum_p90_residual_m=float(
-                self.declare_parameter(
-                    "ground_maximum_p90_residual_m", 0.008
-                ).value
+                self.declare_parameter("ground_maximum_p90_residual_m", 0.008).value
             ),
             minimum_spatial_coverage=float(
-                self.declare_parameter(
-                    "ground_minimum_spatial_coverage", 0.35
-                ).value
+                self.declare_parameter("ground_minimum_spatial_coverage", 0.35).value
             ),
             minimum_temporal_consistency=float(
                 self.declare_parameter(
@@ -145,9 +134,7 @@ class GeometricHazardNode(InputHealthNode):
                 ).value
             ),
             temporal_smoothing_factor=float(
-                self.declare_parameter(
-                    "ground_temporal_smoothing_factor", 0.35
-                ).value
+                self.declare_parameter("ground_temporal_smoothing_factor", 0.35).value
             ),
         )
         geometry_config = StrongGeometryConfig(
@@ -161,68 +148,74 @@ class GeometricHazardNode(InputHealthNode):
                 self.declare_parameter("maximum_hazard_height_m", 0.15).value
             ),
             minimum_support_points=int(
-                self.declare_parameter(
-                    "strong_minimum_support_points", 18
-                ).value
+                self.declare_parameter("strong_minimum_support_points", 18).value
             ),
             cluster_cell_m=float(
                 self.declare_parameter("geometry_cluster_cell_m", 0.04).value
             ),
             minimum_spatial_span_m=float(
-                self.declare_parameter(
-                    "strong_minimum_spatial_span_m", 0.04
-                ).value
+                self.declare_parameter("strong_minimum_spatial_span_m", 0.04).value
+            ),
+        )
+        depth_evidence_config = DepthEvidenceConfig(
+            sample_stride_px=int(
+                self.declare_parameter("depth_evidence_sample_stride_px", 1).value
+            ),
+            minimum_weak_height_m=float(
+                self.declare_parameter("weak_height_m", 0.006).value
+            ),
+            ground_noise_multiplier=float(
+                self.declare_parameter("weak_ground_noise_multiplier", 3.0).value
+            ),
+            strong_height_m=geometry_config.strong_height_m,
+            minimum_weak_support_points=int(
+                self.declare_parameter("weak_minimum_support_points", 8).value
+            ),
+            cluster_cell_m=geometry_config.cluster_cell_m,
+            minimum_physical_span_m=float(
+                self.declare_parameter("weak_minimum_spatial_span_m", 0.04).value
+            ),
+            minimum_invalid_pixels=int(
+                self.declare_parameter("invalid_depth_minimum_pixels", 12).value
+            ),
+            minimum_invalid_span_px=float(
+                self.declare_parameter("invalid_depth_minimum_span_px", 12.0).value
+            ),
+            maximum_invalid_width_px=float(
+                self.declare_parameter("invalid_depth_maximum_width_px", 8.0).value
             ),
         )
         cable_config = TrainingFreeCableConfig(
             local_contrast_threshold=float(
-                self.declare_parameter(
-                    "cable_local_contrast_threshold", 24.0
-                ).value
+                self.declare_parameter("cable_local_contrast_threshold", 24.0).value
             ),
             maximum_half_width_px=int(
-                self.declare_parameter(
-                    "cable_maximum_half_width_px", 3
-                ).value
+                self.declare_parameter("cable_maximum_half_width_px", 3).value
             ),
             minimum_component_pixels=int(
-                self.declare_parameter(
-                    "cable_minimum_component_pixels", 16
-                ).value
+                self.declare_parameter("cable_minimum_component_pixels", 16).value
             ),
             minimum_length_px=float(
                 self.declare_parameter("cable_minimum_length_px", 16.0).value
             ),
             minimum_apparent_width_px=float(
-                self.declare_parameter(
-                    "cable_minimum_apparent_width_px", 1.5
-                ).value
+                self.declare_parameter("cable_minimum_apparent_width_px", 1.5).value
             ),
             maximum_apparent_width_px=float(
-                self.declare_parameter(
-                    "cable_maximum_apparent_width_px", 6.0
-                ).value
+                self.declare_parameter("cable_maximum_apparent_width_px", 6.0).value
             ),
             minimum_width_consistency=float(
-                self.declare_parameter(
-                    "cable_minimum_width_consistency", 0.55
-                ).value
+                self.declare_parameter("cable_minimum_width_consistency", 0.55).value
             ),
             minimum_curve_continuity=float(
-                self.declare_parameter(
-                    "cable_minimum_curve_continuity", 0.80
-                ).value
+                self.declare_parameter("cable_minimum_curve_continuity", 0.80).value
             ),
             minimum_physical_span_m=float(
-                self.declare_parameter(
-                    "cable_minimum_physical_span_m", 0.06
-                ).value
+                self.declare_parameter("cable_minimum_physical_span_m", 0.06).value
             ),
             maximum_ground_age_ns=int(
                 float(
-                    self.declare_parameter(
-                        "cable_maximum_ground_age_ms", 500.0
-                    ).value
+                    self.declare_parameter("cable_maximum_ground_age_ms", 500.0).value
                 )
                 * 1_000_000
             ),
@@ -232,33 +225,27 @@ class GeometricHazardNode(InputHealthNode):
                 self.declare_parameter("association_radius_m", 0.08).value
             ),
             confirmation_window_ns=int(
-                float(
-                    self.declare_parameter(
-                        "confirmation_window_ms", 350.0
-                    ).value
-                )
+                float(self.declare_parameter("confirmation_window_ms", 350.0).value)
                 * 1_000_000
             ),
             candidate_retention_ns=int(
-                float(
-                    self.declare_parameter(
-                        "candidate_retention_ms", 500.0
-                    ).value
-                )
+                float(self.declare_parameter("candidate_retention_ms", 500.0).value)
                 * 1_000_000
             ),
             confirmed_retention_ns=int(
-                float(
-                    self.declare_parameter(
-                        "confirmed_retention_ms", 2000.0
-                    ).value
-                )
+                float(self.declare_parameter("confirmed_retention_ms", 2000.0).value)
                 * 1_000_000
+            ),
+            minimum_rgb_confirmation_confidence=float(
+                self.declare_parameter(
+                    "minimum_rgb_confirmation_confidence", 0.75
+                ).value
             ),
         )
         self._pipeline = GeometricHazardPipeline(
             ground_config=ground_config,
             geometry_config=geometry_config,
+            depth_evidence_config=depth_evidence_config,
             cable_config=cable_config,
             tracker_config=tracker_config,
         )
@@ -277,10 +264,24 @@ class GeometricHazardNode(InputHealthNode):
         self._cloud_publisher = self.create_publisher(
             PointCloud2, cloud_topic, cloud_qos
         )
-        retention_check_period_ms = float(
+        candidate_topic = str(
             self.declare_parameter(
-                "retention_check_period_ms", 100.0
+                "candidate_diagnostics_topic",
+                "/low_profile_hazard_perception/candidate_diagnostics",
             ).value
+        )
+        self._candidate_publisher = self.create_publisher(
+            DiagnosticArray,
+            candidate_topic,
+            QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+            ),
+        )
+        retention_check_period_ms = float(
+            self.declare_parameter("retention_check_period_ms", 100.0).value
         )
         if retention_check_period_ms <= 0.0:
             raise ValueError("retention_check_period_ms must be positive")
@@ -378,9 +379,7 @@ class GeometricHazardNode(InputHealthNode):
         del stream, is_static, message
         if observation.input_error or not observation.required_chain_available:
             self._block_new_confirmation(
-                "tf:invalid"
-                if observation.input_error
-                else "tf:chain_unavailable"
+                "tf:invalid" if observation.input_error else "tf:chain_unavailable"
             )
             return
         try:
@@ -423,17 +422,14 @@ class GeometricHazardNode(InputHealthNode):
                 or observation.frame_id != self._camera_frame
                 or observation.encoding != "rgb8"
                 or observation.step < observation.width * 3
-                or observation.data_size
-                < observation.step * observation.height
+                or observation.data_size < observation.step * observation.height
             ):
                 self._block_new_confirmation("color:invalid")
                 return
             try:
                 values = _rgb_values(message)
             except ValueError as error:
-                self.get_logger().warning(
-                    f"RGB cable path rejected frame: {error}"
-                )
+                self.get_logger().warning(f"RGB cable path rejected frame: {error}")
                 return
             if self._pending_rgb is not None:
                 self._pending_rgb_drop_count += 1
@@ -455,9 +451,7 @@ class GeometricHazardNode(InputHealthNode):
         try:
             values = _depth_values(message)
         except ValueError as error:
-            self.get_logger().warning(
-                f"depth geometry rejected frame: {error}"
-            )
+            self.get_logger().warning(f"depth geometry rejected frame: {error}")
             return
         if self._pending_depth is not None:
             self._pending_depth_drop_count += 1
@@ -500,6 +494,7 @@ class GeometricHazardNode(InputHealthNode):
             self._latest_confirmation_spread_m = max(
                 confirmed.spatial_spread_m for confirmed in result.confirmed
             )
+        self._publish_candidate_reports(result.candidate_reports)
         self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
         self._publish_health()
         self._try_process_pending_rgb()
@@ -524,11 +519,9 @@ class GeometricHazardNode(InputHealthNode):
             self._publish_health()
             return
         if self._diagnostic_pink_enabled:
-            self._diagnostic_pink_pixel_count = (
-                self._pipeline.diagnostic_pink_count(
-                    values,
-                    self._diagnostic_pink_config,
-                )
+            self._diagnostic_pink_pixel_count = self._pipeline.diagnostic_pink_count(
+                values,
+                self._diagnostic_pink_config,
             )
         self._pending_rgb = None
         self._geometric_degradation_reason = result.degradation_reason
@@ -546,6 +539,7 @@ class GeometricHazardNode(InputHealthNode):
             self._latest_confirmation_spread_m = max(
                 confirmed.spatial_spread_m for confirmed in rgb_confirmed
             )
+        self._publish_candidate_reports(result.candidate_reports)
         self._publish_retained(result.retained, sensor_now_ns=stamp_ns)
         self._publish_health()
 
@@ -579,6 +573,8 @@ class GeometricHazardNode(InputHealthNode):
                 hazard.sensor_stamp_ns,
                 hazard.points_odom,
                 hazard.spatial_spread_m,
+                hazard.evidence,
+                hazard.confidence,
             )
             for hazard in retained
         )
@@ -596,6 +592,18 @@ class GeometricHazardNode(InputHealthNode):
         self._had_operational_hazard_output = bool(retained)
         self._active_retained_count = len(retained)
         self._last_published_retained_signature = signature
+
+    def _publish_candidate_reports(self, reports: tuple[CandidateReport, ...]) -> None:
+        if not reports:
+            return
+        message = DiagnosticArray()
+        latest_stamp_ns = max(report.sensor_stamp_ns for report in reports)
+        message.header.stamp = Time(nanoseconds=latest_stamp_ns).to_msg()
+        message.status = [
+            _candidate_diagnostic(report, index) for index, report in enumerate(reports)
+        ]
+        self._candidate_publisher.publish(message)
+        self._candidate_publish_count += 1
 
     def _operational_hazard_output_enabled(self) -> bool:
         return True
@@ -636,9 +644,7 @@ class GeometricHazardNode(InputHealthNode):
                 "ground.spatial_coverage": metrics.spatial_coverage,
                 "ground.temporal_consistency": (metrics.temporal_consistency),
                 "ground.camera_height_m": estimate.model.camera_height_m,
-                "ground.nominal_height_error_m": (
-                    metrics.nominal_height_error_m
-                ),
+                "ground.nominal_height_error_m": (metrics.nominal_height_error_m),
                 "ground.nominal_angle_error_degrees": (
                     self._last_nominal_ground_angle_error_degrees
                 ),
@@ -653,21 +659,23 @@ class GeometricHazardNode(InputHealthNode):
                     self._latest_confirmation_spread_m
                 ),
                 "geometry.cloud_publish_count": self._cloud_publish_count,
-                "geometry.pending_depth_drops": (
-                    self._pending_depth_drop_count
+                "geometry.candidate_diagnostics_publish_count": (
+                    self._candidate_publish_count
                 ),
+                "geometry.pending_depth_drops": (self._pending_depth_drop_count),
                 "geometry.processed_depth_count": self._processed_depth_count,
                 "geometry.latest_processed_depth_stamp_ns": (
                     self._latest_processed_depth_stamp_ns
                 ),
                 "cable.provider": "training_free_thin_line",
-                "cable.latest_candidate_count": (
-                    self._last_cable_candidate_count
-                ),
+                "cable.latest_candidate_count": (self._last_cable_candidate_count),
                 "cable.confirmed_observation_count": (
                     self._rgb_cable_confirmation_count
                 ),
                 "cable.confirmation_observations": 2,
+                "cable.minimum_confirmation_confidence": (
+                    self._pipeline.tracker.config.minimum_rgb_confirmation_confidence
+                ),
                 "cable.pending_rgb_drops": self._pending_rgb_drop_count,
                 "cable.processed_rgb_count": self._processed_rgb_count,
                 "cable.latest_processed_rgb_stamp_ns": (
@@ -682,26 +690,19 @@ class GeometricHazardNode(InputHealthNode):
                     self._diagnostic_pink_pixel_count
                 ),
                 "cable.diagnostic_pink_operational": False,
-                "geometry.active_retained_hazard_count": (
-                    self._active_retained_count
-                ),
-                "geometry.degradation_reason": (
-                    self._geometric_degradation_reason
-                ),
+                "geometry.active_retained_hazard_count": (self._active_retained_count),
+                "geometry.degradation_reason": (self._geometric_degradation_reason),
                 "geometry.alignment_frame": "odom",
                 "geometry.confirmation_observations": 2,
                 "geometry.candidate_retention_ms": (
-                    self._pipeline.tracker.config.candidate_retention_ns
-                    / 1_000_000
+                    self._pipeline.tracker.config.candidate_retention_ns / 1_000_000
                 ),
                 "geometry.confirmed_retention_ms": (
-                    self._pipeline.tracker.config.confirmed_retention_ns
-                    / 1_000_000
+                    self._pipeline.tracker.config.confirmed_retention_ns / 1_000_000
                 ),
                 "geometry.output_durability": "transient_local",
                 "odom.maximum_interpolation_gap_ms": (
-                    self._pipeline.odom.maximum_interpolation_gap_ns
-                    / 1_000_000
+                    self._pipeline.odom.maximum_interpolation_gap_ns / 1_000_000
                 ),
                 "odom.maximum_translation_jump_m": (
                     self._pipeline.odom.maximum_translation_jump_m
@@ -712,6 +713,48 @@ class GeometricHazardNode(InputHealthNode):
             }
         )
         return ground
+
+
+def _candidate_diagnostic(report: CandidateReport, index: int) -> DiagnosticStatus:
+    status = DiagnosticStatus()
+    confirmed = report.decision_reason.value.startswith("CONFIRMED_")
+    status.level = DiagnosticStatus.OK if confirmed else DiagnosticStatus.WARN
+    status.name = f"low_profile_hazard_perception/candidate/{index}"
+    status.message = report.decision_reason.value
+    status.hardware_id = "rgbd_evidence_fusion"
+    metrics = report.ground_quality
+    values = {
+        "sensor_stamp_ns": report.sensor_stamp_ns,
+        "centroid_odom_x": report.centroid_odom[0],
+        "centroid_odom_y": report.centroid_odom[1],
+        "centroid_odom_z": report.centroid_odom[2],
+        "evidence_sources": ",".join(
+            source.value for source in report.evidence_sources
+        ),
+        "ground.accepted": report.ground_accepted,
+        "ground.reason": report.ground_reason,
+        "ground.support_count": metrics.support_count,
+        "ground.inlier_ratio": metrics.inlier_ratio,
+        "ground.p90_residual_m": metrics.p90_residual_m,
+        "ground.spatial_coverage": metrics.spatial_coverage,
+        "ground.temporal_consistency": metrics.temporal_consistency,
+        "confidence": report.confidence,
+        "decision_reason": report.decision_reason.value,
+        "operational_confirmed": confirmed,
+    }
+    status.values = [
+        KeyValue(key=key, value=_diagnostic_value(value))
+        for key, value in values.items()
+    ]
+    return status
+
+
+def _diagnostic_value(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, float):
+        return f"{value:.6f}"
+    return str(value)
 
 
 def _depth_values(message: Image) -> tuple[int, ...]:
@@ -815,6 +858,8 @@ def _point_cloud(
     )
     cloud.is_dense = True
     return cloud
+
+
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     node = GeometricHazardNode()
