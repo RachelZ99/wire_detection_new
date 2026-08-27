@@ -15,6 +15,10 @@ explicit input state machine:
 - `INVALID`, stale/missing health, profile mismatch, speed above 0.3 m/s, or
   stale/future observation: block new snapshots and preserve the last snapshot;
 - silence on the cloud topic does not clear anything;
+- before the first health at adapter startup only, quarantine one latest cloud
+  to tolerate independent transient-local delivery order; discard it if that
+  first health is blocked, and never quarantine clouds received in later
+  blocked states;
 - recovery after health-liveness loss, or a health heartbeat clock regression,
   starts a new source generation and the first subsequently accepted snapshot
   becomes that generation's snapshot.

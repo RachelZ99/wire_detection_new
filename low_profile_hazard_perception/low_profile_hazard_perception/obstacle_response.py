@@ -190,7 +190,10 @@ class UnifiedObstacleResponseBridge:
         self._health = health
         self._apply_health_policy()
         self._publish_status()
-        self._apply_pending_snapshot(sensor_now_ns=health.heartbeat_stamp_ns)
+        if self._mode is ResponseSourceMode.BLOCKED:
+            self._pending_snapshot = None
+        else:
+            self._apply_pending_snapshot(sensor_now_ns=health.heartbeat_stamp_ns)
 
     def tick(self, *, received_monotonic_ns: int) -> None:
         if received_monotonic_ns < 0:
@@ -218,9 +221,11 @@ class UnifiedObstacleResponseBridge:
         received_monotonic_ns: int,
     ) -> bool:
         """Apply one snapshot; silence alone never removes retained hazards."""
+        had_health = self._health is not None
         self.tick(received_monotonic_ns=received_monotonic_ns)
         if self._mode is ResponseSourceMode.BLOCKED:
-            self._pending_snapshot = (snapshot, sensor_now_ns)
+            if not had_health and self._reason == "health:missing":
+                self._pending_snapshot = (snapshot, sensor_now_ns)
             return False
         return self._apply_snapshot(snapshot, sensor_now_ns=sensor_now_ns)
 
@@ -228,6 +233,7 @@ class UnifiedObstacleResponseBridge:
         """Block a malformed health/cloud contract without clearing hazards."""
         if not reason:
             raise ValueError("operational input rejection reason is required")
+        self._pending_snapshot = None
         self._awaiting_fresh_snapshot = True
         self._block(f"contract:{reason}")
 

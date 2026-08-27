@@ -36,10 +36,12 @@ obstacle-response layer and must not control the chassis directly.
 - A non-empty message replaces the complete retained snapshot. No repeated
   publication is required while that snapshot is unchanged; topic silence does
   not mean that a hazard disappeared.
-- Health and cloud are independent transient-local topics. If the latest cloud
-  arrives before the latest health at startup or restart, the bridge buffers
-  that one cloud and evaluates it when fresh health arrives; it does not depend
-  on a repeat publication.
+- Health and cloud are independent transient-local topics. Before the first
+  health at adapter startup, the bridge may quarantine one latest cloud and
+  evaluates it when that first health arrives. If the first health is blocked,
+  the quarantined cloud is discarded. Once any health has been received,
+  snapshots received during `INVALID`, stale health, or profile/speed blocking
+  are ignored rather than replayed after recovery.
 - A zero-width message is an explicit empty snapshot. It may clear only under
   the configured state policy. Missing, stale, invalid, or degraded input is
   never converted to empty space.

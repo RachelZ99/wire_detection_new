@@ -155,8 +155,15 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
         self.assertEqual(self.port.statuses[-1].mode, ResponseSourceMode.BLOCKED)
 
         self.bridge.consume_health(_health(state=HealthState.DEGRADED))
-        self.assertEqual(len(self.port.snapshots), 1)
+        self.assertEqual(self.port.snapshots, [])
         self.assertEqual(self.port.statuses[-1].mode, ResponseSourceMode.DEGRADED)
+        self.assertTrue(
+            self.bridge.consume_cloud(
+                decode_confirmed_cloud(_cloud()),
+                sensor_now_ns=10 * NS,
+                received_monotonic_ns=10 * NS,
+            )
+        )
         self.assertFalse(
             self.bridge.consume_cloud(
                 decode_confirmed_cloud(_cloud(stamp_ns=10 * NS, empty=True)),
@@ -165,6 +172,18 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
             )
         )
         self.assertEqual(len(self.port.snapshots), 1)
+
+    def test_profile_blocked_snapshot_is_not_replayed_after_recovery(self) -> None:
+        self.bridge.consume_health(_health(binding_state="MISMATCH"))
+        self.bridge.consume_cloud(
+            decode_confirmed_cloud(_cloud()),
+            sensor_now_ns=10 * NS,
+            received_monotonic_ns=10 * NS,
+        )
+
+        self.bridge.consume_health(_health(received_ns=11 * NS, heartbeat_ns=11 * NS))
+
+        self.assertEqual(self.port.snapshots, [])
 
     def test_explicit_empty_cloud_clears_only_while_healthy(self) -> None:
         self.bridge.consume_health(_health())
