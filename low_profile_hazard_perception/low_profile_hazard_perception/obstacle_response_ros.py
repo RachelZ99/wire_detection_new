@@ -57,7 +57,7 @@ class ObstacleResponseAdapterNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self._subscriptions = (
+        self._operational_subscriptions = (
             self.create_subscription(
                 PointCloud2,
                 "/low_profile_hazard_perception/confirmed_hazards",

@@ -17,6 +17,21 @@ it contains only a demonstration `STOP/GO` signal and proposed Nav2/costmap
 configuration, not the robot's existing unified obstacle-response API. Neither
 was imported.
 
+## Isolated ROS 2 Humble validation
+
+The repository CI script was run on an Ubuntu 22.04 ARM64 VMware guest with
+ROS 2 Humble. The test snapshot lived under `/tmp`; the guest's checkout was
+left unchanged. Discovery was restricted with `ROS_DOMAIN_ID=97` and
+`ROS_LOCALHOST_ONLY=1`, and no robot endpoint or motion-command publisher was
+used.
+
+The final `scripts/ros2_humble_ci.sh` run completed `colcon build`, collected
+117 pytest cases, and reported `117 tests, 0 errors, 0 failures, 0 skipped`.
+This includes the health, geometric-hazard, and unified-obstacle-response ROS
+graph tests. The guest did not have the declared `python3-jsonschema` runtime
+dependency installed system-wide, so `jsonschema` was installed only into the
+temporary test directory for this run.
+
 ## Missing external contract
 
 The robot owner must provide the real unified response endpoint and message,

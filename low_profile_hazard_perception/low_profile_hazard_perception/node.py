@@ -10,8 +10,7 @@ from functools import partial
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from nav_msgs.msg import Odometry
-from rclpy.clock import Clock
-from rclpy.clock_type import ClockType
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -441,8 +440,10 @@ class InputHealthNode(Node):
                 )
                 for transform in message.transforms
             ),
-            required_chain_available=self._tf_buffer.can_transform(
-                self._base_frame, self._camera_frame, Time()
+            required_chain_available=bool(
+                self._tf_buffer.can_transform(
+                    self._base_frame, self._camera_frame, Time()
+                )
             ),
         )
         if not validate_transform_batch(stream, observation):
@@ -463,8 +464,10 @@ class InputHealthNode(Node):
                 )
         observation = replace(
             observation,
-            required_chain_available=self._tf_buffer.can_transform(
-                self._base_frame, self._camera_frame, Time()
+            required_chain_available=bool(
+                self._tf_buffer.can_transform(
+                    self._base_frame, self._camera_frame, Time()
+                )
             ),
         )
         self._monitor.observe_transforms(stream, observation)

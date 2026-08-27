@@ -5,6 +5,7 @@ import math
 import struct
 import time
 from collections.abc import Callable
+from functools import cache
 
 import pytest
 
@@ -94,7 +95,8 @@ def _cable_color(stamp: object, *, center_column: int) -> Image:
     return message
 
 
-def _depth(stamp: object, *, object_center_column: int | None) -> Image:
+@cache
+def _depth_data(object_center_column: int | None) -> bytes:
     width = 640
     height = 360
     fx = fy = 455.0
@@ -120,6 +122,12 @@ def _depth(stamp: object, *, object_center_column: int | None) -> Image:
             height_above_ground = 0.030 if raised else 0.0
             depth_m = (height_above_ground - 0.225) / denominator
             values.append(max(0, min(65535, int(round(depth_m * 1000.0)))))
+    return values.tobytes()
+
+
+def _depth(stamp: object, *, object_center_column: int | None) -> Image:
+    width = 640
+    height = 360
     message = Image()
     message.header.stamp = stamp
     message.header.frame_id = "camera_1_color_optical_frame"
@@ -128,7 +136,7 @@ def _depth(stamp: object, *, object_center_column: int | None) -> Image:
     message.encoding = "16UC1"
     message.is_bigendian = False
     message.step = width * 2
-    message.data = values.tobytes()
+    message.data = _depth_data(object_center_column)
     return message
 
 
@@ -143,9 +151,9 @@ def test_two_rgb_cable_observations_publish_the_same_odom_cloud() -> None:
         args=[
             "--ros-args",
             "-p",
-            "sensor_stale_after_ms:=5000.0",
+            "sensor_stale_after_ms:=30000.0",
             "-p",
-            "receive_stale_after_ms:=5000.0",
+            "receive_stale_after_ms:=30000.0",
         ]
     )
     perception = GeometricHazardNode()
@@ -200,6 +208,15 @@ def test_two_rgb_cable_observations_publish_the_same_odom_cloud() -> None:
     }
     try:
         _spin_until(executor, lambda: bool(health))
+        _spin_until(
+            executor,
+            lambda: all(
+                publisher.get_subscription_count() >= 1
+                for publisher in publishers.values()
+            ),
+            timeout=10.0,
+        )
+        _depth_data(None)
         base_ns = driver.get_clock().now().nanoseconds + 100_000_000
         depth_stamp = Time(nanoseconds=base_ns + 200_000_000).to_msg()
         first_rgb_stamp = Time(nanoseconds=base_ns + 300_000_000).to_msg()
@@ -222,13 +239,16 @@ def test_two_rgb_cable_observations_publish_the_same_odom_cloud() -> None:
         publishers["tf"].publish(
             TFMessage(transforms=[_transform(depth_stamp, "odom", "base_footprint")])
         )
-        for stamp_ns in range(
-            base_ns + 150_000_000,
-            base_ns + 651_000_000,
-            50_000_000,
-        ):
+        odom_stamps = range(
+            base_ns + 150_000_000, base_ns + 651_000_000, 50_000_000
+        )
+        for processed_count, stamp_ns in enumerate(odom_stamps, start=1):
             publishers["odom"].publish(_odom(Time(nanoseconds=stamp_ns).to_msg(), 0.0))
-            executor.spin_once(timeout_sec=0.01)
+            _spin_until(
+                executor,
+                lambda: _values(health).get("odom.processed_count")
+                == str(processed_count),
+            )
         publishers["depth"].publish(_depth(depth_stamp, object_center_column=None))
         publishers["color"].publish(_cable_color(first_rgb_stamp, center_column=320))
         _spin_until(
@@ -262,7 +282,7 @@ def test_two_rgb_cable_observations_publish_the_same_odom_cloud() -> None:
             timeout=4.0,
         )
 
-        cloud = clouds[-1]
+        cloud = next(message for message in clouds if message.width > 0)
         assert cloud.header.frame_id == "odom"
         assert cloud.header.stamp == second_rgb_stamp
         evidence_field = next(
@@ -288,6 +308,22 @@ def test_two_rgb_cable_observations_publish_the_same_odom_cloud() -> None:
         assert values["cable.confirmation_observations"] == "2"
         assert values["cable.rgb_depth_synchronizer"] == "disabled"
         assert values["cable.diagnostic_pink_operational"] == "false"
+        assert values["state"] == "HEALTHY", values["reasons"]
+        assert values["geometry.degradation_reason"] == ""
+
+        confirmed_stamp_ns = (
+            cloud.header.stamp.sec * 1_000_000_000 + cloud.header.stamp.nanosec
+        )
+        _spin_until(
+            executor,
+            lambda: any(message.width == 0 for message in clouds),
+            timeout=4.0,
+        )
+        clearing = next(message for message in clouds if message.width == 0)
+        clearing_stamp_ns = (
+            clearing.header.stamp.sec * 1_000_000_000 + clearing.header.stamp.nanosec
+        )
+        assert clearing_stamp_ns - confirmed_stamp_ns >= 2_000_000_000
     finally:
         executor.remove_node(driver)
         executor.remove_node(perception)
@@ -325,9 +361,11 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
         args=[
             "--ros-args",
             "-p",
-            "sensor_stale_after_ms:=5000.0",
+            "sensor_stale_after_ms:=30000.0",
             "-p",
-            "receive_stale_after_ms:=5000.0",
+            "receive_stale_after_ms:=30000.0",
+            "-p",
+            "retention_check_period_ms:=60000.0",
         ]
     )
     perception = GeometricHazardNode()
@@ -375,6 +413,16 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
     }
     try:
         _spin_until(executor, lambda: bool(health))
+        _spin_until(
+            executor,
+            lambda: all(
+                publisher.get_subscription_count() >= 1
+                for publisher in publishers.values()
+            ),
+            timeout=10.0,
+        )
+        _depth_data(360)
+        _depth_data(302)
         base_ns = driver.get_clock().now().nanoseconds + 100_000_000
         first_stamp = Time(nanoseconds=base_ns + 100_000_000).to_msg()
         second_stamp = Time(nanoseconds=base_ns + 300_000_000).to_msg()
@@ -434,14 +482,14 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
         )
         assert clouds == []
 
-        stale_stamp = Time(nanoseconds=base_ns - 6_000_000_000).to_msg()
+        stale_stamp = Time(nanoseconds=base_ns - 60_000_000_000).to_msg()
         publishers["depth_info"].publish(_camera_info(stale_stamp))
         _spin_until(
             executor,
             lambda: float(
                 _values(health).get("depth_camera_info.sensor_stamp_age_ms", "0")
             )
-            > 5000.0,
+            > 30000.0,
         )
         publishers["depth"].publish(_depth(second_stamp, object_center_column=302))
         _spin_until(
@@ -461,7 +509,8 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
         )
         _spin_until(
             executor,
-            lambda: float(_values(health).get("tf.sensor_stamp_age_ms", "0")) > 5000.0,
+            lambda: float(_values(health).get("tf.sensor_stamp_age_ms", "0"))
+            > 30000.0,
         )
         publishers["depth"].publish(_depth(third_stamp, object_center_column=302))
         _spin_until(
@@ -597,16 +646,6 @@ def test_two_motion_aligned_depth_observations_publish_one_odom_cloud() -> (None
         assert values["geometry.active_retained_hazard_count"] == "1"
         assert values["geometry.degradation_reason"] == ""
 
-        _spin_until(executor, lambda: len(clouds) == 3, timeout=4.0)
-        clearing = clouds[-1]
-        assert clearing.width == 0
-        clearing_stamp_ns = (
-            clearing.header.stamp.sec * 1_000_000_000 + clearing.header.stamp.nanosec
-        )
-        reconfirmation_stamp_ns = (
-            reconfirmation_stamp.sec * 1_000_000_000 + reconfirmation_stamp.nanosec
-        )
-        assert clearing_stamp_ns - reconfirmation_stamp_ns >= 2_000_000_000
     finally:
         executor.remove_node(driver)
         executor.remove_node(perception)
