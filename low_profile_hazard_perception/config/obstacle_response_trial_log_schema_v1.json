@@ -11,6 +11,7 @@
       "items": {
         "type": "object",
         "required": ["event", "stamp_ns"],
+        "additionalProperties": false,
         "properties": {
           "event": {"enum": ["trial_started", "confirmed_hazard", "unified_response_received", "response_started", "command_sample", "odom_sample", "health_transition", "trial_finished"]},
           "stamp_ns": {"type": "integer", "minimum": 0},
@@ -33,7 +34,47 @@
           "state": {"enum": ["HEALTHY", "DEGRADED", "INVALID"]},
           "reasons": {"type": "array", "items": {"type": "string"}},
           "outcome": {"enum": ["stop", "avoid", "reject"]}
-        }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"event": {"const": "trial_started"}}},
+            "then": {"required": ["trial_id", "profile_id", "planned_speed_mps", "motion", "approach_angle_degrees", "hazard_kind"]}
+          },
+          {
+            "if": {"properties": {"event": {"const": "confirmed_hazard"}}},
+            "then": {"required": ["observation_stamp_ns", "confirmed_stamp_ns", "hazard_track_id", "detection_distance_m"]}
+          },
+          {
+            "if": {"properties": {"event": {"const": "unified_response_received"}}},
+            "then": {"required": ["hazard_track_id"]}
+          },
+          {
+            "if": {"properties": {"event": {"const": "response_started"}}},
+            "then": {"required": ["hazard_track_id", "response"]}
+          },
+          {
+            "if": {"properties": {"event": {"const": "command_sample"}}},
+            "then": {
+              "required": ["stream", "linear_mps", "angular_rps"],
+              "properties": {"stream": {"enum": ["command", "smoothed_command"]}}
+            }
+          },
+          {
+            "if": {"properties": {"event": {"const": "odom_sample"}}},
+            "then": {
+              "required": ["stream", "x_m", "y_m", "linear_mps", "angular_rps"],
+              "properties": {"stream": {"enum": ["wheel_odom", "fused_odom"]}}
+            }
+          },
+          {
+            "if": {"properties": {"event": {"const": "health_transition"}}},
+            "then": {"required": ["state", "reasons"]}
+          },
+          {
+            "if": {"properties": {"event": {"const": "trial_finished"}}},
+            "then": {"required": ["outcome"]}
+          }
+        ]
       }
     }
   }

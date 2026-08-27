@@ -27,7 +27,6 @@ def _health(
     binding_state: str = "BOUND",
     maximum_speed_mps: float = 0.3,
     observed_speed_mps: float = 0.3,
-    diagnostics: dict[str, str] | None = None,
 ) -> PerceptionHealth:
     return PerceptionHealth(
         state=state,
@@ -37,7 +36,6 @@ def _health(
         profile_binding_state=binding_state,
         profile_maximum_speed_mps=maximum_speed_mps,
         observed_speed_mps=observed_speed_mps,
-        diagnostics=diagnostics or {},
     )
 
 
@@ -113,7 +111,9 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
         self.assertEqual(self.port.snapshots[-1].observation_stamp_ns, 9 * NS)
         self.assertEqual(self.port.statuses[-1].mode, ResponseSourceMode.ACTIVE)
 
-    def test_missing_or_stale_health_never_means_clear_space(self) -> None:
+    def test_cloud_first_startup_is_buffered_and_stale_health_never_clears(
+        self,
+    ) -> None:
         snapshot = decode_confirmed_cloud(_cloud())
         self.assertFalse(
             self.bridge.consume_cloud(
@@ -125,12 +125,10 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
         self.assertEqual(self.port.snapshots, [])
 
         self.bridge.consume_health(_health())
-        self.assertTrue(
-            self.bridge.consume_cloud(
-                snapshot,
-                sensor_now_ns=10 * NS,
-                received_monotonic_ns=10 * NS,
-            )
+        self.assertEqual(len(self.port.snapshots), 1)
+        self.assertEqual(
+            self.port.snapshots[0].hazards[0].hazard_track_id,
+            snapshot.hazards[0].hazard_track_id,
         )
         self.bridge.tick(received_monotonic_ns=11 * NS)
         self.assertEqual(self.port.statuses[-1].mode, ResponseSourceMode.BLOCKED)
@@ -157,13 +155,7 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
         self.assertEqual(self.port.statuses[-1].mode, ResponseSourceMode.BLOCKED)
 
         self.bridge.consume_health(_health(state=HealthState.DEGRADED))
-        self.assertTrue(
-            self.bridge.consume_cloud(
-                decode_confirmed_cloud(_cloud()),
-                sensor_now_ns=10 * NS,
-                received_monotonic_ns=10 * NS,
-            )
-        )
+        self.assertEqual(len(self.port.snapshots), 1)
         self.assertEqual(self.port.statuses[-1].mode, ResponseSourceMode.DEGRADED)
         self.assertFalse(
             self.bridge.consume_cloud(
@@ -225,6 +217,12 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
 
     def test_provider_diagnostics_do_not_change_the_response(self) -> None:
         outputs = []
+        common = {
+            "profile.id": "dcw2-home-640x360-v1",
+            "profile.binding_state": "BOUND",
+            "profile.maximum_speed_mps": "0.3",
+            "profile.latest_observed_speed_mps": "0.3",
+        }
         for diagnostics in (
             {
                 "cable.provider": "training_free_thin_line",
@@ -239,7 +237,14 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
         ):
             port = RecordingObstacleResponsePort()
             bridge = UnifiedObstacleResponseBridge(self.bridge.config, port)
-            bridge.consume_health(_health(diagnostics=diagnostics))
+            bridge.consume_health(
+                perception_health_from_values(
+                    state="HEALTHY",
+                    values={**common, **diagnostics},
+                    received_monotonic_ns=10 * NS,
+                    heartbeat_stamp_ns=10 * NS,
+                )
+            )
             bridge.consume_cloud(
                 decode_confirmed_cloud(_cloud()),
                 sensor_now_ns=10 * NS,
@@ -278,16 +283,22 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
         )
 
         self.assertEqual(rule, npu)
-        self.assertEqual(rule.diagnostics, {})
+        self.assertFalse(hasattr(rule, "diagnostics"))
 
     def test_npu_unavailable_does_not_hide_degraded_geometry_output(self) -> None:
         self.bridge.consume_health(
-            _health(
-                state=HealthState.DEGRADED,
-                diagnostics={
+            perception_health_from_values(
+                state="DEGRADED",
+                values={
+                    "profile.id": "dcw2-home-640x360-v1",
+                    "profile.binding_state": "BOUND",
+                    "profile.maximum_speed_mps": "0.3",
+                    "profile.latest_observed_speed_mps": "0.3",
                     "cable.provider": "future_npu",
                     "resource.npu_state": "unavailable",
                 },
+                received_monotonic_ns=10 * NS,
+                heartbeat_stamp_ns=10 * NS,
             )
         )
 
@@ -351,6 +362,19 @@ class UnifiedObstacleResponseBridgeTest(unittest.TestCase):
         self.assertEqual(config.maximum_speed_mps, 0.3)
         self.assertEqual(config.health_timeout_ns, 600_000_000)
         self.assertEqual(config.maximum_observation_age_ns, 2_500_000_000)
+
+    def test_malformed_operational_input_blocks_without_clearing(self) -> None:
+        self.bridge.consume_health(_health())
+        self.bridge.consume_cloud(
+            decode_confirmed_cloud(_cloud()),
+            sensor_now_ns=10 * NS,
+            received_monotonic_ns=10 * NS,
+        )
+
+        self.bridge.reject_operational_input("confirmed_cloud_invalid")
+
+        self.assertEqual(self.port.statuses[-1].mode, ResponseSourceMode.BLOCKED)
+        self.assertEqual(len(self.port.snapshots), 1)
 
 
 if __name__ == "__main__":

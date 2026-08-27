@@ -9,6 +9,14 @@ from low_profile_hazard_perception.geometry import (
     GroundEstimatorConfig,
     StrongGeometryConfig,
 )
+from low_profile_hazard_perception.obstacle_response import (
+    ConfirmedHazard,
+    ConfirmedHazardSnapshot,
+    ObstacleResponseConfig,
+    RecordingObstacleResponsePort,
+    UnifiedObstacleResponseBridge,
+    perception_health_from_values,
+)
 from low_profile_hazard_perception.temporal import (
     CandidateDecisionReason,
     HazardTrackerConfig,
@@ -85,6 +93,61 @@ def _pipeline(intrinsics: CameraIntrinsics) -> GeometricHazardPipeline:
 
 
 class GeometricPipelineTests(unittest.TestCase):
+    def test_depth_geometry_remains_operational_when_npu_is_unavailable(
+        self,
+    ) -> None:
+        depth, intrinsics = _scene(raised=True, reflective_hole=False)
+        pipeline = _pipeline(intrinsics)
+        pipeline.process_depth(1_000_000_000, depth)
+        result = pipeline.process_depth(1_100_000_000, depth)
+        assert result is not None
+        self.assertEqual(len(result.confirmed), 1)
+        geometric_hazard = result.confirmed[0]
+        port = RecordingObstacleResponsePort()
+        bridge = UnifiedObstacleResponseBridge(
+            ObstacleResponseConfig(
+                expected_profile_id="dcw2-home-640x360-v1",
+                maximum_speed_mps=0.3,
+                health_timeout_ns=600_000_000,
+                maximum_observation_age_ns=2_500_000_000,
+            ),
+            port,
+        )
+        bridge.consume_health(
+            perception_health_from_values(
+                state="DEGRADED",
+                values={
+                    "profile.id": "dcw2-home-640x360-v1",
+                    "profile.binding_state": "BOUND",
+                    "profile.maximum_speed_mps": "0.3",
+                    "profile.latest_observed_speed_mps": "0.3",
+                    "cable.provider": "future_npu",
+                    "resource.npu_state": "unavailable",
+                },
+                received_monotonic_ns=1_100_000_000,
+                heartbeat_stamp_ns=1_100_000_000,
+            )
+        )
+
+        accepted = bridge.consume_cloud(
+            ConfirmedHazardSnapshot(
+                observation_stamp_ns=geometric_hazard.sensor_stamp_ns,
+                hazards=(
+                    ConfirmedHazard(
+                        hazard_track_id=geometric_hazard.hazard_track_id,
+                        observation_stamp_ns=geometric_hazard.sensor_stamp_ns,
+                        points_odom=geometric_hazard.points_odom,
+                    ),
+                ),
+                explicit_empty=False,
+            ),
+            sensor_now_ns=1_100_000_000,
+            received_monotonic_ns=1_100_000_000,
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(len(port.snapshots), 1)
+
     def test_two_supported_protrusions_confirm_but_first_does_not(
         self,
     ) -> None:

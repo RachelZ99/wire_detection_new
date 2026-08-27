@@ -6,8 +6,7 @@ import argparse
 import hashlib
 import json
 import math
-import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +14,9 @@ from typing import Any
 class ResponseTrialRecorder:
     """Collect versioned trial events without assuming robot topic names."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], int] | None = None) -> None:
         self._events: list[dict[str, object]] = []
+        self._clock = clock
 
     def record(
         self,
@@ -25,9 +25,13 @@ class ResponseTrialRecorder:
         stamp_ns: int | None = None,
         **values: object,
     ) -> None:
+        if stamp_ns is None:
+            if self._clock is None:
+                raise ValueError("stamp_ns or an injected trial clock is required")
+            stamp_ns = self._clock()
         item = {
             "event": event,
-            "stamp_ns": time.time_ns() if stamp_ns is None else stamp_ns,
+            "stamp_ns": stamp_ns,
             **values,
         }
         _event_stamp(item)
@@ -49,6 +53,7 @@ class ResponseTrialRecorder:
 def evaluate_response_trial(
     events: Sequence[Mapping[str, object]],
     *,
+    expected_profile_id: str = "dcw2-home-640x360-v1",
     maximum_profile_speed_mps: float = 0.3,
     stopped_speed_mps: float = 0.02,
     braking_speed_drop_mps: float = 0.01,
@@ -70,9 +75,61 @@ def evaluate_response_trial(
         "response_started",
         "command_sample",
         "odom_sample",
+        "health_transition",
         "trial_finished",
     )
     reasons = [f"missing:{kind}" for kind in required if not by_kind.get(kind)]
+    required_fields = {
+        "trial_started": (
+            "trial_id",
+            "profile_id",
+            "planned_speed_mps",
+            "motion",
+            "approach_angle_degrees",
+            "hazard_kind",
+        ),
+        "confirmed_hazard": (
+            "observation_stamp_ns",
+            "confirmed_stamp_ns",
+            "hazard_track_id",
+            "detection_distance_m",
+        ),
+        "unified_response_received": ("hazard_track_id",),
+        "response_started": ("hazard_track_id", "response"),
+        "command_sample": ("stream", "linear_mps", "angular_rps"),
+        "odom_sample": (
+            "stream",
+            "x_m",
+            "y_m",
+            "linear_mps",
+            "angular_rps",
+        ),
+        "health_transition": ("state", "reasons"),
+        "trial_finished": ("outcome",),
+    }
+    for kind, fields in required_fields.items():
+        for event in by_kind.get(kind, []):
+            reasons.extend(
+                f"missing:{kind}.{field}"
+                for field in fields
+                if event.get(field) is None
+            )
+    command_streams = {
+        str(event.get("stream")) for event in by_kind.get("command_sample", [])
+    }
+    odom_streams = {
+        str(event.get("stream")) for event in by_kind.get("odom_sample", [])
+    }
+    reasons.extend(
+        f"missing:{stream}"
+        for stream in ("command", "smoothed_command")
+        if stream not in command_streams
+    )
+    reasons.extend(
+        f"missing:{stream}"
+        for stream in ("wheel_odom", "fused_odom")
+        if stream not in odom_streams
+    )
     started = _first(by_kind, "trial_started")
     confirmed = _first(by_kind, "confirmed_hazard")
     response_received = _first(by_kind, "unified_response_received")
@@ -80,6 +137,9 @@ def evaluate_response_trial(
     finished = _first(by_kind, "trial_finished")
 
     planned_speed = _optional_number(started, "planned_speed_mps")
+    profile_id = started.get("profile_id") if started else None
+    if profile_id is not None and profile_id != expected_profile_id:
+        reasons.append("profile_id_mismatch")
     observed_speed = max(
         (
             abs(float(event.get("linear_mps", 0.0)))
@@ -118,6 +178,14 @@ def evaluate_response_trial(
     present_timeline = [stamp for stamp in timeline if stamp is not None]
     if present_timeline != sorted(present_timeline):
         reasons.append("timestamp_order_invalid")
+    response_name = response_started.get("response") if response_started else None
+    outcome_name = finished.get("outcome") if finished else None
+    if (
+        response_name is not None
+        and outcome_name is not None
+        and response_name != outcome_name
+    ):
+        reasons.append("response_outcome_mismatch")
 
     smoothed = [
         event
@@ -127,7 +195,7 @@ def evaluate_response_trial(
     initial_speed = None
     if response_started_ns is not None:
         prior = [
-            abs(float(event["linear_mps"]))
+            abs(float(event.get("linear_mps", math.inf)))
             for event in smoothed
             if _event_stamp(event) <= response_started_ns
         ]
@@ -140,7 +208,7 @@ def evaluate_response_trial(
                 event
                 for event in smoothed
                 if _event_stamp(event) >= response_started_ns
-                and abs(float(event["linear_mps"]))
+                and abs(float(event.get("linear_mps", math.inf)))
                 <= initial_speed - braking_speed_drop_mps
             ),
             None,
@@ -189,6 +257,7 @@ def evaluate_response_trial(
         or reason.startswith("observed_speed")
         or reason.startswith("hazard_track_mismatch")
         or reason.startswith("timestamp_order")
+        or reason.startswith("response_outcome_mismatch")
         for reason in reasons
     )
     evidence_state = (
@@ -206,7 +275,7 @@ def evaluate_response_trial(
         "schema_version": 1,
         "evidence_state": evidence_state,
         "trial_id": started.get("trial_id") if started else None,
-        "profile_id": started.get("profile_id") if started else None,
+        "profile_id": profile_id,
         "planned_speed_mps": planned_speed,
         "observed_maximum_speed_mps": observed_speed,
         "motion": started.get("motion") if started else None,
@@ -228,7 +297,11 @@ def evaluate_response_trial(
         "braking_start_position": _position(braking_pose),
         "stopping_position": _position(stopped_pose),
         "stopping_distance_m": stopping_distance,
-        "command_sample_count": len(by_kind.get("command_sample", [])),
+        "command_sample_count": sum(
+            event.get("stream") == "command"
+            for event in by_kind.get("command_sample", [])
+        ),
+        "smoothed_command_sample_count": len(smoothed),
         "wheel_odom_sample_count": len(wheel),
         "fused_odom_sample_count": len(fused),
         "health_transitions": health_transitions,
@@ -302,7 +375,7 @@ def _nearest(
 
 
 def _position(event: Mapping[str, object] | None) -> dict[str, float] | None:
-    if event is None:
+    if event is None or event.get("x_m") is None or event.get("y_m") is None:
         return None
     return {"x_m": float(event["x_m"]), "y_m": float(event["y_m"])}
 

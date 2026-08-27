@@ -114,6 +114,14 @@ def _trial_events(speed: float = 0.3) -> list[dict[str, object]]:
 
 
 class ResponseTrialAuditTest(unittest.TestCase):
+    def test_recorder_requires_one_explicit_clock_domain(self) -> None:
+        with self.assertRaisesRegex(ValueError, "trial clock"):
+            ResponseTrialRecorder().record("trial_started")
+
+        recorder = ResponseTrialRecorder(clock=lambda: 123)
+        recorder.record("health_transition", state="HEALTHY", reasons=[])
+        self.assertEqual(recorder.document()["events"][0]["stamp_ns"], 123)
+
     def test_physical_matrix_contains_no_claimed_evidence(self) -> None:
         manifest_path = (
             Path(__file__).resolve().parent.parent
@@ -175,6 +183,15 @@ class ResponseTrialAuditTest(unittest.TestCase):
         self.assertEqual(report["evidence_state"], "REJECTED")
         self.assertIn("profile_speed_exceeded", report["rejection_reasons"])
 
+    def test_wrong_profile_is_rejected_not_validated(self) -> None:
+        events = _trial_events()
+        events[0]["profile_id"] = "future-unvalidated-profile"
+
+        report = evaluate_response_trial(events)
+
+        self.assertEqual(report["evidence_state"], "REJECTED")
+        self.assertIn("profile_id_mismatch", report["rejection_reasons"])
+
     def test_impossible_timestamp_order_is_rejected(self) -> None:
         events = _trial_events()
         next(
@@ -192,6 +209,35 @@ class ResponseTrialAuditTest(unittest.TestCase):
         self.assertEqual(report["evidence_state"], "INCOMPLETE")
         self.assertIn("missing:confirmed_hazard", report["rejection_reasons"])
         self.assertIsNone(report["stopping_distance_m"])
+
+    def test_named_events_without_required_evidence_remain_incomplete(self) -> None:
+        events = _trial_events()
+        confirmed = next(
+            event for event in events if event["event"] == "confirmed_hazard"
+        )
+        del confirmed["observation_stamp_ns"]
+        del confirmed["detection_distance_m"]
+        finished = next(event for event in events if event["event"] == "trial_finished")
+        del finished["outcome"]
+        events = [
+            event
+            for event in events
+            if event["event"] != "health_transition"
+            and not (
+                event["event"] == "command_sample" and event["stream"] == "command"
+            )
+        ]
+
+        report = evaluate_response_trial(events)
+
+        self.assertEqual(report["evidence_state"], "INCOMPLETE")
+        self.assertIn(
+            "missing:confirmed_hazard.observation_stamp_ns",
+            report["rejection_reasons"],
+        )
+        self.assertIn("missing:command", report["rejection_reasons"])
+        self.assertIn("missing:health_transition", report["rejection_reasons"])
+        self.assertIn("missing:trial_finished.outcome", report["rejection_reasons"])
 
 
 if __name__ == "__main__":

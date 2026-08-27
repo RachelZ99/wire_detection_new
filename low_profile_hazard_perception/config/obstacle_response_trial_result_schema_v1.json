@@ -2,24 +2,67 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Obstacle response trial audit result",
   "type": "object",
-  "required": ["schema_version", "evidence_state", "profile_id", "observation_stamp_ns", "confirmed_stamp_ns", "unified_response_received_stamp_ns", "response_started_stamp_ns", "camera_to_response_ms", "detection_distance_m", "braking_start_position", "stopping_position", "stopping_distance_m", "hazard_track_id", "health_transitions", "outcome", "rejection_reasons"],
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_state", "trial_id", "profile_id", "planned_speed_mps", "observed_maximum_speed_mps", "motion", "approach_angle_degrees", "hazard_kind", "observation_stamp_ns", "confirmed_stamp_ns", "unified_response_received_stamp_ns", "response_started_stamp_ns", "braking_start_stamp_ns", "stopped_stamp_ns", "camera_to_response_ms", "camera_to_response_start_ms", "confirmation_latency_ms", "detection_distance_m", "braking_start_position", "stopping_position", "stopping_distance_m", "hazard_track_id", "command_sample_count", "smoothed_command_sample_count", "wheel_odom_sample_count", "fused_odom_sample_count", "health_transitions", "outcome", "rejection_reasons"],
   "properties": {
     "schema_version": {"const": 1},
     "evidence_state": {"enum": ["MEASURED", "INCOMPLETE", "REJECTED"]},
+    "trial_id": {"type": ["string", "null"]},
     "profile_id": {"type": ["string", "null"]},
+    "planned_speed_mps": {"type": ["number", "null"]},
+    "observed_maximum_speed_mps": {"type": ["number", "null"]},
+    "motion": {"type": ["string", "null"]},
+    "approach_angle_degrees": {"type": ["number", "null"]},
+    "hazard_kind": {"type": ["string", "null"]},
     "observation_stamp_ns": {"type": ["integer", "null"]},
     "confirmed_stamp_ns": {"type": ["integer", "null"]},
     "unified_response_received_stamp_ns": {"type": ["integer", "null"]},
     "response_started_stamp_ns": {"type": ["integer", "null"]},
+    "braking_start_stamp_ns": {"type": ["integer", "null"]},
+    "stopped_stamp_ns": {"type": ["integer", "null"]},
     "camera_to_response_ms": {"type": ["number", "null"]},
+    "camera_to_response_start_ms": {"type": ["number", "null"]},
+    "confirmation_latency_ms": {"type": ["number", "null"]},
     "detection_distance_m": {"type": ["number", "null"]},
-    "braking_start_position": {"type": ["object", "null"]},
-    "stopping_position": {"type": ["object", "null"]},
+    "braking_start_position": {"$ref": "#/$defs/position"},
+    "stopping_position": {"$ref": "#/$defs/position"},
     "stopping_distance_m": {"type": ["number", "null"]},
     "hazard_track_id": {"type": ["integer", "null"]},
-    "health_transitions": {"type": "array"},
+    "command_sample_count": {"type": "integer", "minimum": 0},
+    "smoothed_command_sample_count": {"type": "integer", "minimum": 0},
+    "wheel_odom_sample_count": {"type": "integer", "minimum": 0},
+    "fused_odom_sample_count": {"type": "integer", "minimum": 0},
+    "health_transitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stamp_ns", "state", "reasons"],
+        "additionalProperties": false,
+        "properties": {
+          "stamp_ns": {"type": "integer", "minimum": 0},
+          "state": {"enum": ["HEALTHY", "DEGRADED", "INVALID"]},
+          "reasons": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
     "outcome": {"enum": ["stop", "avoid", "reject", null]},
     "rejection_reasons": {"type": "array", "items": {"type": "string"}},
     "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "position": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["x_m", "y_m"],
+          "additionalProperties": false,
+          "properties": {
+            "x_m": {"type": "number"},
+            "y_m": {"type": "number"}
+          }
+        }
+      ]
+    }
   }
 }

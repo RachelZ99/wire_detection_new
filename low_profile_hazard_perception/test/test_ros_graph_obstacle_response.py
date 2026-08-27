@@ -152,9 +152,10 @@ def test_adapter_consumes_only_confirmed_cloud_and_top_level_health():
             and cloud_publisher.get_subscription_count() == 1,
         )
         now_ns = adapter.get_clock().now().nanoseconds
-        health_publisher.publish(_health(now_ns))
-        _spin_until(executor, lambda: bool(port.statuses))
         cloud_publisher.publish(_cloud(now_ns))
+        _spin_until(executor, lambda: bool(port.statuses))
+        assert not port.snapshots
+        health_publisher.publish(_health(now_ns))
         _spin_until(executor, lambda: len(port.snapshots) == 1)
 
         assert port.snapshots[0].hazards[0].hazard_track_id == 4

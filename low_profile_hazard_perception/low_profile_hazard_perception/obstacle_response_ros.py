@@ -93,6 +93,7 @@ class ObstacleResponseAdapterNode(Node):
             )
         except ValueError as error:
             self.get_logger().error(str(error))
+            self._bridge.reject_operational_input("health_invalid")
             return
         self._bridge.consume_health(health)
 
@@ -120,6 +121,7 @@ class ObstacleResponseAdapterNode(Node):
             )
         except ValueError as error:
             self.get_logger().error(str(error))
+            self._bridge.reject_operational_input("confirmed_cloud_invalid")
             return
         self._bridge.consume_cloud(
             snapshot,

@@ -36,6 +36,10 @@ obstacle-response layer and must not control the chassis directly.
 - A non-empty message replaces the complete retained snapshot. No repeated
   publication is required while that snapshot is unchanged; topic silence does
   not mean that a hazard disappeared.
+- Health and cloud are independent transient-local topics. If the latest cloud
+  arrives before the latest health at startup or restart, the bridge buffers
+  that one cloud and evaluates it when fresh health arrives; it does not depend
+  on a repeat publication.
 - A zero-width message is an explicit empty snapshot. It may clear only under
   the configured state policy. Missing, stale, invalid, or degraded input is
   never converted to empty space.
@@ -94,6 +98,11 @@ start and stopping positions; stopping distance; hazard track; health
 transitions; and final `stop`/`avoid`/`reject` outcome. Input SHA-256 is included
 in the result. Fault injection defaults to mocks, offline replay, or an isolated
 ROS domain.
+
+Every `stamp_ns` used for latency/order calculations must be captured in the
+same robot ROS clock domain as the perception observation stamp. The reusable
+`ResponseTrialRecorder` therefore requires either an explicit stamp for every
+event or an injected clock; it never silently substitutes wall time.
 
 The physical matrix is
 `config/obstacle_response_physical_trial_manifest_v1.json`. Every case remains

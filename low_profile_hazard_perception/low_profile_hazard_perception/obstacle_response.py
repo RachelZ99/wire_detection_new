@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import json
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Mapping, Protocol
@@ -86,9 +86,6 @@ class PerceptionHealth:
     profile_binding_state: str
     profile_maximum_speed_mps: float
     observed_speed_mps: float
-    diagnostics: Mapping[str, str] = field(
-        default_factory=dict, compare=False, repr=False
-    )
 
 
 def perception_health_from_values(
@@ -177,6 +174,7 @@ class UnifiedObstacleResponseBridge:
         self._source_generation = 0
         self._awaiting_fresh_snapshot = True
         self._health_liveness_was_lost = False
+        self._pending_snapshot: tuple[ConfirmedHazardSnapshot, int] | None = None
 
     def consume_health(self, health: PerceptionHealth) -> None:
         if health.received_monotonic_ns < 0 or health.heartbeat_stamp_ns < 0:
@@ -192,6 +190,7 @@ class UnifiedObstacleResponseBridge:
         self._health = health
         self._apply_health_policy()
         self._publish_status()
+        self._apply_pending_snapshot(sensor_now_ns=health.heartbeat_stamp_ns)
 
     def tick(self, *, received_monotonic_ns: int) -> None:
         if received_monotonic_ns < 0:
@@ -221,7 +220,23 @@ class UnifiedObstacleResponseBridge:
         """Apply one snapshot; silence alone never removes retained hazards."""
         self.tick(received_monotonic_ns=received_monotonic_ns)
         if self._mode is ResponseSourceMode.BLOCKED:
+            self._pending_snapshot = (snapshot, sensor_now_ns)
             return False
+        return self._apply_snapshot(snapshot, sensor_now_ns=sensor_now_ns)
+
+    def reject_operational_input(self, reason: str) -> None:
+        """Block a malformed health/cloud contract without clearing hazards."""
+        if not reason:
+            raise ValueError("operational input rejection reason is required")
+        self._awaiting_fresh_snapshot = True
+        self._block(f"contract:{reason}")
+
+    def _apply_snapshot(
+        self,
+        snapshot: ConfirmedHazardSnapshot,
+        *,
+        sensor_now_ns: int,
+    ) -> bool:
         age_ns = sensor_now_ns - snapshot.observation_stamp_ns
         if age_ns < 0:
             self._block("cloud:observation_from_future")
@@ -246,6 +261,17 @@ class UnifiedObstacleResponseBridge:
             self._awaiting_fresh_snapshot = False
             self._publish_status()
         return True
+
+    def _apply_pending_snapshot(self, *, sensor_now_ns: int) -> None:
+        pending = self._pending_snapshot
+        if pending is None or self._mode is ResponseSourceMode.BLOCKED:
+            return
+        self._pending_snapshot = None
+        snapshot, sensor_now_at_receive_ns = pending
+        self._apply_snapshot(
+            snapshot,
+            sensor_now_ns=max(sensor_now_ns, sensor_now_at_receive_ns),
+        )
 
     def _apply_health_policy(self) -> None:
         assert self._health is not None
