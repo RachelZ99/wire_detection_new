@@ -14,3 +14,4 @@ log/
 *.mcap
 *.onnx
 *.rknn
+wire_rgbd_strip_01.zip
