@@ -427,3 +427,25 @@ The configured retention and current behavior are visible as
 `geometry.candidate_retention_ms`, `geometry.confirmed_retention_ms`,
 `geometry.active_retained_hazard_count`, `geometry.degradation_reason`, and
 `geometry.output_durability` in the health diagnostic.
+
+## Unified obstacle-response pre-integration
+
+Ticket 9's local adapter contract is documented in
+[`docs/unified-obstacle-response-integration.md`](docs/unified-obstacle-response-integration.md).
+It consumes only `/low_profile_hazard_perception/confirmed_hazards` and
+`/low_profile_hazard_perception/health`, then invokes an injected robot-owned
+response port. This repository does not contain the robot's real unified
+obstacle-response API, so there is deliberately no production launch or direct
+motion publisher.
+
+An isolated or physical event log can be audited with:
+
+```bash
+ros2 run low_profile_hazard_perception audit_obstacle_response_trial \
+  trial-log.json --output trial-result.json
+```
+
+The log/result schemas and the still-unexecuted physical matrix are installed
+from `low_profile_hazard_perception/config/`. Current work is pre-integration
+only: Ticket 7 remains `EVIDENCE_INCOMPLETE`, the safety policy in ADR-0010 is
+proposed, and no 0.3 m/s or eight-hour whole-robot evidence is claimed.

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "contract_state": "PREINTEGRATION_ONLY",
+  "physical_use_approved": false,
+  "real_unified_response_interface": "UNRESOLVED",
+  "profile_binding": {
+    "expected_profile_id": "dcw2-home-640x360-v1",
+    "maximum_speed_mps": 0.3
+  },
+  "inputs": {
+    "confirmed_hazards": {
+      "topic": "/low_profile_hazard_perception/confirmed_hazards",
+      "type": "sensor_msgs/msg/PointCloud2",
+      "qos": "reliable/transient_local/keep_last_1"
+    },
+    "health": {
+      "topic": "/low_profile_hazard_perception/health",
+      "type": "diagnostic_msgs/msg/DiagnosticArray",
+      "period_ms": 200.0,
+      "qos": "reliable/transient_local/keep_last_1"
+    }
+  },
+  "provisional_input_policy": {
+    "health_timeout_ms": 600.0,
+    "maximum_observation_age_ms": 2500.0,
+    "accept_confirmed_while_degraded": true,
+    "allow_clear_while_degraded": false,
+    "invalid_or_stale_behavior": "block_new_and_preserve_existing",
+    "cloud_silence_behavior": "no_state_change"
+  },
+  "forbidden_dependencies": [
+    "cable.provider",
+    "resource.npu_state",
+    "candidate_diagnostics",
+    "rgb_mask",
+    "provider_specific_reason"
+  ]
+}

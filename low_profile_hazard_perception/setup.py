@@ -45,6 +45,8 @@ setup(
             "low_profile_hazard_perception.home_regression:main",
             "run_home_regression = "
             "low_profile_hazard_perception.home_regression_replay:main",
+            "audit_obstacle_response_trial = "
+            "low_profile_hazard_perception.response_trial:main",
         ],
     },
 )

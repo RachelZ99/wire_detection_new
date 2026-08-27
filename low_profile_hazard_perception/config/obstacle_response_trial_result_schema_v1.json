@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Obstacle response trial audit result",
+  "type": "object",
+  "required": ["schema_version", "evidence_state", "profile_id", "observation_stamp_ns", "confirmed_stamp_ns", "unified_response_received_stamp_ns", "response_started_stamp_ns", "camera_to_response_ms", "detection_distance_m", "braking_start_position", "stopping_position", "stopping_distance_m", "hazard_track_id", "health_transitions", "outcome", "rejection_reasons"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "evidence_state": {"enum": ["MEASURED", "INCOMPLETE", "REJECTED"]},
+    "profile_id": {"type": ["string", "null"]},
+    "observation_stamp_ns": {"type": ["integer", "null"]},
+    "confirmed_stamp_ns": {"type": ["integer", "null"]},
+    "unified_response_received_stamp_ns": {"type": ["integer", "null"]},
+    "response_started_stamp_ns": {"type": ["integer", "null"]},
+    "camera_to_response_ms": {"type": ["number", "null"]},
+    "detection_distance_m": {"type": ["number", "null"]},
+    "braking_start_position": {"type": ["object", "null"]},
+    "stopping_position": {"type": ["object", "null"]},
+    "stopping_distance_m": {"type": ["number", "null"]},
+    "hazard_track_id": {"type": ["integer", "null"]},
+    "health_transitions": {"type": "array"},
+    "outcome": {"enum": ["stop", "avoid", "reject", null]},
+    "rejection_reasons": {"type": "array", "items": {"type": "string"}},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

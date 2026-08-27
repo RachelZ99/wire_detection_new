@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Obstacle response trial log",
+  "type": "object",
+  "required": ["schema_version", "events"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["event", "stamp_ns"],
+        "properties": {
+          "event": {"enum": ["trial_started", "confirmed_hazard", "unified_response_received", "response_started", "command_sample", "odom_sample", "health_transition", "trial_finished"]},
+          "stamp_ns": {"type": "integer", "minimum": 0},
+          "trial_id": {"type": "string", "minLength": 1},
+          "profile_id": {"type": "string", "minLength": 1},
+          "planned_speed_mps": {"type": "number", "minimum": 0},
+          "motion": {"type": "string"},
+          "approach_angle_degrees": {"type": "number"},
+          "hazard_kind": {"type": "string"},
+          "observation_stamp_ns": {"type": "integer", "minimum": 1},
+          "confirmed_stamp_ns": {"type": "integer", "minimum": 1},
+          "hazard_track_id": {"type": "integer", "minimum": 0},
+          "detection_distance_m": {"type": "number", "minimum": 0},
+          "response": {"enum": ["stop", "avoid", "reject"]},
+          "stream": {"enum": ["command", "smoothed_command", "wheel_odom", "fused_odom"]},
+          "linear_mps": {"type": "number"},
+          "angular_rps": {"type": "number"},
+          "x_m": {"type": "number"},
+          "y_m": {"type": "number"},
+          "state": {"enum": ["HEALTHY", "DEGRADED", "INVALID"]},
+          "reasons": {"type": "array", "items": {"type": "string"}},
+          "outcome": {"enum": ["stop", "avoid", "reject"]}
+        }
+      }
+    }
+  }
+}

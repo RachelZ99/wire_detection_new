@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "evidence_state": "PLANNED_NO_EVIDENCE",
+  "profile_id": "dcw2-home-640x360-v1",
+  "maximum_speed_mps": 0.3,
+  "requires_ticket_7_terminal_decision": true,
+  "requires_safety_policy_approval": true,
+  "factory_validation": false,
+  "trials": [
+    {"case_id": "straight_0p3", "kind": "motion", "motion": "straight", "speed_mps": 0.3, "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "turn_left_0p3", "kind": "motion", "motion": "turning_left", "speed_mps": 0.3, "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "turn_right_0p3", "kind": "motion", "motion": "turning_right", "speed_mps": 0.3, "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "multi_angle", "kind": "approach", "angles_degrees": [0, 30, 60, 90, 120, 150], "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "acceleration_braking", "kind": "motion", "motion": "accelerate_then_brake", "speed_mps": 0.3, "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "blind_zone_retention", "kind": "retention", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "rgb_failure", "kind": "fault", "fault": "rgb", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "depth_failure", "kind": "fault", "fault": "depth", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "camera_info_failure", "kind": "fault", "fault": "camera_info", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "tf_failure", "kind": "fault", "fault": "tf", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "odom_failure", "kind": "fault", "fault": "odom", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "ground_failure", "kind": "fault", "fault": "ground_model", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "optional_npu_failure", "kind": "fault", "fault": "optional_npu", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "repeated_cables", "kind": "repeat", "hazard": "cable", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "repeated_power_strips", "kind": "repeat", "hazard": "power_strip", "status": "PLANNED_NO_EVIDENCE"},
+    {"case_id": "eight_hour_robot_run", "kind": "soak", "duration_seconds": 28800, "status": "PLANNED_NO_EVIDENCE"}
+  ]
+}
